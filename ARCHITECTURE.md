@@ -526,3 +526,199 @@ fresh database (setup just created it) ⇒ apply schema.sql + seed.sql, then
 BASELINE-insert every migration id WITHOUT executing the files; existing
 database ⇒ ensure `schema_migrations` exists, apply + record each pending
 migration. Never run a migration twice; stop with a clear error if one fails.
+
+## Stage 2 — runtime fidelity
+
+The reference production stack is: edge LB → **PHP-FPM web fleet** →
+**gearmand** job server(s) → long-running **PHP CLI Gearman workers**
+(supervised, unique job ids, trace ids embedded in every workload), with
+**MySQL-backed sessions** and Redis for cache/rate-limits only. Stage 2 makes
+the replica match that runtime shape on one host. Every change keeps a
+fallback so `setup.sh`/`launch.sh` still bring the stack up anywhere.
+
+New `.env` keys (defaults in parens — absent key ⇒ default):
+
+```
+WEB_RUNTIME=auto        # auto|fpm|cli — auto: php-fpm when the binary is found, else php -S
+SESSION_DRIVER=mysql    # mysql|redis — mysql matches production (sessions table)
+QUEUE_DRIVER=auto       # auto|gearman|redis — auto: resolved ONCE by launch.sh (gearmand
+                        #   binary present ⇒ gearman, else redis) and exported as
+                        #   QUEUE_DRIVER to every service it starts, so web and workers
+                        #   can never disagree mid-run
+GEARMAN_HOST=127.0.0.1
+GEARMAN_PORT=4730
+```
+
+### Web tier: PHP-FPM pools (WEB_RUNTIME)
+
+- Two independent FPM **masters** (one per instance — kill drills stay
+  per-instance), TCP listen on the existing `127.0.0.1:{{WEB1_PORT}}` /
+  `{{WEB2_PORT}}` (port-based orphan sweeps and tooling keep working).
+- `config/php-fpm.conf.template`, placeholders `{{ROOT}} {{NAME}} {{PORT}}`,
+  rendered by launch.sh to `storage/run/fpm-<name>.conf` (sed-to-stdout, same
+  pattern as nginx). Global section: `pid storage/run/<name>.pid`,
+  `error_log storage/logs/<name>.log`, daemonized (pid file is the source of
+  truth, like nginx). Pool `[<name>]`: `pm = dynamic`, `pm.max_children = 6`,
+  `pm.start_servers = 2`, `pm.min_spare_servers = 1`,
+  `pm.max_spare_servers = 3`, `pm.status_path = /fpm-status`,
+  `request_slowlog_timeout = 2s`, `slowlog = storage/logs/<name>-slow.log`,
+  `catch_workers_output = yes`, `env[INSTANCE_ID] = <name>` (and pass through
+  `QUEUE_DRIVER`), `php_admin_flag[display_errors] = off`. opcache stays at
+  binary defaults (FPM = opcache on — production parity the cli mode lacks).
+- php-fpm binary discovery (launch.sh + setup.sh): `command -v php-fpm` →
+  `$(dirname "$(command -v php)")/../sbin/php-fpm` →
+  `$(brew --prefix php)/sbin/php-fpm` → `/usr/sbin/php-fpm8*` (apt installs
+  the separate `php8.x-fpm` package — setup.sh offers it).
+- nginx template split: `config/nginx.conf.template` keeps everything shared
+  and gains `include {{WEB_INC}};` inside the server block; launch.sh renders
+  `config/nginx.web-fpm.inc.template` (fpm mode) or
+  `config/nginx.web-proxy.inc.template` (cli mode) to
+  `storage/run/nginx-web.inc`. The fpm include: `location /` →
+  `fastcgi_pass web_backend` (same `upstream web_backend` least_conn +
+  max_fails ejection; `fastcgi_next_upstream error timeout`), inline fastcgi
+  params with `SCRIPT_FILENAME {{ROOT}}/apps/web/public/index.php` always
+  (front controller — no PATH_INFO games). The proxy include is today's
+  proxy_pass block unchanged.
+- **Per-pool probe routes** (both modes, used by launch.sh readiness and the
+  status service — direct `:9001/healthz` HTTP probes die with fpm):
+  `location = /__pool/web1/healthz` → that one pool only (fpm:
+  `fastcgi_pass 127.0.0.1:{{WEB1_PORT}}` + `fastcgi_param REQUEST_URI /healthz`;
+  proxy: `proxy_pass http://127.0.0.1:{{WEB1_PORT}}/healthz`). fpm mode also
+  exposes `location = /__pool/web1/fpm-status` (allow 127.0.0.1, deny all;
+  `SCRIPT_NAME`/`SCRIPT_FILENAME = /fpm-status` so the FPM status handler
+  intercepts) — pm saturation/listen-queue are first-class SLI surfaces.
+  Same pair for web2. Start order becomes: pools → nginx → readiness probes
+  via `http://127.0.0.1:{{LB_PORT}}/__pool/<name>/healthz`.
+- Status service probes `web1`/`web2` via the `/__pool/` routes and (fpm
+  mode) enriches the detail string from `/fpm-status` JSON (`active
+  processes`, `listen queue`). `launch.sh kill web1` semantics unchanged
+  (kills the pool master's tree; nginx ejects the upstream).
+
+### Queue: gearmand + pure-PHP Gearman client (QUEUE_DRIVER)
+
+- `gearmand` runs as a launch.sh-managed service (`gearmand` from
+  `brew install gearman` / apt `gearman-job-server`; verify exact daemon
+  flags against `gearmand --help` — target:
+  `gearmand -d --listen 127.0.0.1 --port $GEARMAN_PORT --pid-file
+  storage/run/gearmand.pid --log-file storage/logs/gearmand.log`). setup.sh
+  offers the install; absent binary + `QUEUE_DRIVER=auto` ⇒ redis driver,
+  stack still fully works.
+- `lib/GearmanLite.php` — pure-PHP Gearman **binary protocol** over TCP (no
+  pecl, mirrors the RedisClient approach). Packet: magic `\0REQ`/`\0RES` +
+  uint32-BE type + uint32-BE size, args `\0`-joined. Client:
+  `submitBackground(string $function, string $payload, string $unique):
+  string` (SUBMIT_JOB_BG=18 → JOB_CREATED=8, returns handle). Worker:
+  `register(string ...$functions)` (CAN_DO=1),
+  `grab(int $idleTimeout): ?array{function,handle,payload}` implementing
+  GRAB_JOB=9 → JOB_ASSIGN=11 | NO_JOB=10 → PRE_SLEEP=4 → block on NOOP=6
+  with a socket read timeout of `$idleTimeout` (timeout ⇒ return null, the
+  worker loop heartbeats and re-grabs — same cadence contract as
+  `Queue::pop($q, 5)`); `complete(string $handle)` WORK_COMPLETE=13,
+  `fail(string $handle)` WORK_FAIL=14. Admin (text protocol on the same
+  port): `status(): array<function, {queued, running, workers}>` via
+  `status\n`, lines `name\tqueued\trunning\tworkers`, terminated by `.`.
+  Throws `GearmanException extends RuntimeException` on IO errors.
+- `lib/Queue.php` becomes a driver facade — **public API and metric names
+  unchanged** (`push`, `pop`, the `QUEUE_*` consts, `queue.push.queue_pdf`
+  etc., trace embedding). Mapping `queue:pdf`→`rf_pdf`, `queue:email`→
+  `rf_email`, `queue:webhook`→`rf_webhook`. Gearman pushes set
+  `$unique = "<type>-<submission_id>-a<attempt>"` (+`-<kind>` for emails) —
+  gearmand coalesces duplicate uniques exactly like production's unique-id
+  dedup; the attempt suffix keeps retries from coalescing with the original.
+  Workers consume via a shared `lib/WorkerLoop.php` helper that hides the
+  driver split (gearman: register+grab+complete/fail; redis: BLPOP), keeps
+  the existing heartbeat/signal/idempotency/retry contract, and dead-letters
+  to the Redis `queue:dead` list under BOTH drivers (the inspectable
+  dead-letter surface stays in one place; production's equivalent is a
+  DB-backed requeue).
+- `queue:dead` stays a Redis list; `Queue::QUEUE_DEAD` pushes never go
+  through gearman.
+- Status service: when the resolved driver is gearman, queue-depth probes
+  speak the gearmand text protocol (`status\n` over TCP — same hand-rolled
+  socket style as its RESP client) and report `rf_*` queued counts;
+  redis driver keeps LLEN. `/api/status` gains a `gearmand` service probe
+  (TCP connect + status parse) shown only when the driver is gearman; the
+  dashboard labels the active queue driver.
+- New drill (RUNBOOK): kill gearmand → submissions still commit (rows
+  `pending`, flash warning — the existing post-commit degraded path),
+  workers idle-poll and reconnect, restart drains nothing (jobs submitted
+  while down were lost — rows stay `pending`, replay per RUNBOOK).
+
+### Sessions: MySQL (SESSION_DRIVER)
+
+Production keeps PHP sessions in a MySQL `sessions` table (Redis is
+cache/rate-limit only); the replica now defaults to the same:
+
+- Migration `002_stage2.sql` (+ schema.sql): `sessions(sid CHAR(64) PRIMARY
+  KEY, payload MEDIUMTEXT NOT NULL, expires_at TIMESTAMP NOT NULL, KEY
+  idx_sessions_expires (expires_at))`.
+- `lib/Session.php`: `SESSION_DRIVER=mysql` registers a
+  `SessionHandlerInterface` over that table (read = `SELECT payload WHERE
+  sid = ? AND expires_at > NOW()`; write = `INSERT ... ON DUPLICATE KEY
+  UPDATE` with `expires_at = NOW() + SESSION_TTL`; destroy = DELETE; gc =
+  probabilistic (~1%) `DELETE WHERE expires_at < NOW()`). `redis` keeps the
+  existing handler. Cookie/CSRF behavior identical under both.
+- Consequence (document in RUNBOOK's Redis-outage table): with the mysql
+  driver, login/sessions/CSRF **survive a Redis outage**; healthz still
+  reports `checks.redis:false` (queues/cache are degraded).
+
+### Stage 2 product surface (second tier — fidelity first)
+
+- **Form settings page** `GET|POST /forms/{id}/settings` (session auth +
+  ownership + CSRF): publish toggle (existing `forms.is_published` — now
+  actually enforced: unpublished ⇒ public page renders a friendly "closed"
+  page, POST rejected 410, metric `web.submission.closed`),
+  `submission_limit` (SMALLINT NULL — at/over count ⇒ same closed handling),
+  `thankyou_message` (VARCHAR(500) NULL — shown on the thanks page instead
+  of the default copy), `autoresponder_enabled` (TINYINT) + the embed
+  snippet (below). Migration 002 adds the three columns to `forms`.
+- **Autoresponder email**: when enabled AND the submission contains a
+  non-empty answer to the form's first `email`-type field, the submit
+  transaction inserts a SECOND `emails` row with `kind='autoresponder'`,
+  `to_email = <that answer>` and pushes a second email job carrying
+  `"kind":"autoresponder"` (workers tolerate the key's absence ⇒
+  `notification`). Migration 002: `emails.kind
+  ENUM('notification','autoresponder') NOT NULL DEFAULT 'notification'`;
+  UNIQUE `(submission_id)` becomes UNIQUE `(submission_id, kind)`. The
+  email worker loads its row by `(submission_id, kind)`; autoresponder body
+  = "thanks for your submission" + the submitter's own answers; `.eml`
+  filename `submission-<id>-autoresponder.eml`.
+- **Conditional logic** (`forms.conditions` JSON NULL, migration 002):
+  `[{"if":{"field":"f_xxxxxx","op":"equals|not_equals|contains","value":"…"},
+  "then":{"action":"show|hide","target":"f_yyyyyy"}}]`, max 20 rules.
+  Builder UI edits them (hidden input `conditions_json`, validated
+  server-side: refs exist, no self-reference, ops/actions whitelisted, value
+  ≤ 200 chars). Public form: vanilla JS evaluates rules live (checkbox: any
+  selected option matches). Server parity via `apps/web/src/conditions.php`
+  — `conditions_visible_fields(array $fields, array $conditions, array
+  $answers): array<string,bool>`; submission validation treats a field
+  hidden by the submitted answers as not-required and DROPS its answer
+  (hidden data never stored — the engine is the single source of truth,
+  exactly like production's server-side ConditionEngine mirror of the
+  frontend).
+- **Embed**: `GET /f/{public_id}/embed` — same form, minimal chrome (no
+  footer/nav, transparent-friendly background, same POST flow; thanks
+  redirect stays inside `/embed`). The settings page shows a copy-paste
+  `<iframe src=".../f/<public_id>/embed" …>` snippet. Route pattern
+  `/f/{public_id}/embed`.
+- **Submissions inbox upgrade** (existing route `/forms/{id}/submissions`):
+  `?q=` substring search (SQL `LIKE` over the JSON text, escaped `%_`),
+  `?page=` pagination (25/page, total count, prev/next), per-row answer
+  preview, empty states. No new route.
+- **Form views + conversion**: every public form GET (cache hit or miss,
+  not the embed-thanks/`POST` paths) INCRs `stats:views:<public_id>`
+  (no TTL) — metric `web.form.view`. Dashboard + inbox header show views,
+  submissions, conversion % (`submissions / views`, "—" when views = 0).
+  Redis-only (an outage just freezes counters — fine for a playground).
+
+### Stage 2 telemetry additions
+
+| name | type | when |
+|---|---|---|
+| `web.form.view` | c | public form GET (`/f/{public_id}` and `/embed`) |
+| `web.submission.closed` | c | submit rejected: unpublished or over `submission_limit` |
+| `queue.driver_fallback` | c | `QUEUE_DRIVER=auto` resolved to redis because gearmand was unreachable at push time (gearman configured but down) |
+
+Route patterns for spans/logs: `/forms/{id}/settings`,
+`/f/{public_id}/embed` — everything else reuses existing patterns. The
+gearmand probe appears in `/api/status` as service `gearmand`.
