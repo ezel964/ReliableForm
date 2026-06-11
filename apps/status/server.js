@@ -13,6 +13,7 @@ const path = require('path');
 const { performance } = require('perf_hooks');
 const env = require('./env');
 const { RedisClient } = require('./redis');
+const { fetchGearmanStatus } = require('./gearman');
 const otel = require('./otel');
 const applog = require('./applog');
 
@@ -21,6 +22,8 @@ const STATUS_PORT = env.getInt('STATUS_PORT');
 const LB_PORT = env.getInt('LB_PORT');
 const STATSD_HOST = env.get('STATSD_HOST');
 const STATSD_PORT = env.getInt('STATSD_PORT');
+const GEARMAN_HOST = env.get('GEARMAN_HOST', '127.0.0.1');
+const GEARMAN_PORT = env.getInt('GEARMAN_PORT', 4730);
 
 const PROBE_TIMEOUT_MS = 2000;
 const FPM_STATUS_TIMEOUT_MS = 1000;
@@ -29,6 +32,10 @@ const QUEUE_WARN_DEPTH = 100;
 // launch.sh records the resolved WEB_RUNTIME (fpm|cli) here on every start —
 // the only reliable way to know what the RUNNING web tier was started with.
 const WEB_RUNTIME_MARKER = path.join(env.PROJECT_ROOT, 'storage', 'run', 'web-runtime');
+
+// Same pattern for the resolved QUEUE_DRIVER (gearman|redis): gearman moves
+// the queue-depth probes onto the gearmand admin protocol; redis keeps LLEN.
+const QUEUE_DRIVER_MARKER = path.join(env.PROJECT_ROOT, 'storage', 'run', 'queue-driver');
 
 // ---------------------------------------------------------------------------
 // MySQL — optional at runtime: the service must boot without npm install.
@@ -225,6 +232,33 @@ async function probeQueue(key) {
   return { ok: depth <= QUEUE_WARN_DEPTH, detail: 'depth=' + depth };
 }
 
+/** Resolved queue driver as recorded by launch.sh ('redis' when unknown). */
+function queueDriver() {
+  try {
+    const m = fs.readFileSync(QUEUE_DRIVER_MARKER, 'utf8').trim();
+    if (m === 'gearman' || m === 'redis') return m;
+  } catch {
+    /* marker not written yet */
+  }
+  return env.get('QUEUE_DRIVER', 'redis') === 'gearman' ? 'gearman' : 'redis';
+}
+
+/** Gearman-driver queue probe: depth = the function's queued count. */
+async function probeGearmanQueue(statusPromise, fn) {
+  const functions = await statusPromise;
+  const depth = (functions[fn] && functions[fn].queued) || 0;
+  return { ok: depth <= QUEUE_WARN_DEPTH, detail: `depth=${depth} (${fn})` };
+}
+
+/** gearmand service probe: the shared admin-status roundtrip answered. */
+async function probeGearmand(statusPromise) {
+  const functions = await statusPromise;
+  const workers = ['rf_pdf', 'rf_email', 'rf_webhook']
+    .map((f) => f.slice(3) + '=' + ((functions[f] && functions[f].workers) || 0))
+    .join(' ');
+  return { ok: true, detail: 'status ok · workers ' + workers };
+}
+
 async function probeWorker(instanceId) {
   const value = await redis.command('GET', 'heartbeat:' + instanceId);
   if (value === null) return { ok: false, detail: 'no heartbeat (down?)' };
@@ -236,24 +270,41 @@ async function probeWorker(instanceId) {
 
 async function buildStatus() {
   const start = process.hrtime.bigint();
-  const services = await Promise.all([
+  const driver = queueDriver();
+
+  // gearman driver: ONE admin-status TCP roundtrip shared by the three
+  // queue-depth probes and the gearmand service probe.
+  let gearmanStatus = null;
+  if (driver === 'gearman') {
+    gearmanStatus = fetchGearmanStatus(GEARMAN_HOST, GEARMAN_PORT, PROBE_TIMEOUT_MS);
+    gearmanStatus.catch(() => {}); // each probe handles the rejection itself
+  }
+  const queueProbe = (key, fn) =>
+    driver === 'gearman' ? probeGearmanQueue(gearmanStatus, fn) : probeQueue(key);
+
+  const probes = [
     timedProbe('lb', () => httpProbe(LB_PORT)),
     timedProbe('web1', () => probeWebPool('web1')),
     timedProbe('web2', () => probeWebPool('web2')),
     timedProbe('status', async () => ({ ok: true, detail: 'self' })),
     timedProbe('mysql', probeMysql),
     timedProbe('redis', probeRedis),
-    timedProbe('queue:pdf', () => probeQueue('queue:pdf')),
-    timedProbe('queue:email', () => probeQueue('queue:email')),
-    timedProbe('queue:webhook', () => probeQueue('queue:webhook')),
+    timedProbe('queue:pdf', () => queueProbe('queue:pdf', 'rf_pdf')),
+    timedProbe('queue:email', () => queueProbe('queue:email', 'rf_email')),
+    timedProbe('queue:webhook', () => queueProbe('queue:webhook', 'rf_webhook')),
     timedProbe('worker-pdf', () => probeWorker('worker-pdf')),
     timedProbe('worker-email', () => probeWorker('worker-email')),
     timedProbe('worker-webhook', () => probeWorker('worker-webhook')),
-  ]);
+  ];
+  if (driver === 'gearman') {
+    probes.push(timedProbe('gearmand', () => probeGearmand(gearmanStatus)));
+  }
+  const services = await Promise.all(probes);
   metricTiming('status.probe_ms', elapsedMs(start));
   return {
     ok: services.every((s) => s.ok),
     generated_at: new Date().toISOString(),
+    queue_driver: driver,
     services,
   };
 }
@@ -342,6 +393,7 @@ const DASHBOARD_HTML = `<!doctype html>
   .banner.ok { background: #dcfce7; color: #166534; }
   .banner.bad { background: #fee2e2; color: #991b1b; }
   .banner.unknown { background: #fff; color: var(--muted); }
+  #driver { color: var(--muted); font-size: 13px; margin: -12px 0 18px; }
   h2 { font-size: 14px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 26px 0 10px; }
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(188px, 1fr)); gap: 12px; }
   .card { background: #fff; border-radius: 12px; box-shadow: 0 1px 3px rgba(16,24,40,.08); padding: 14px 16px; }
@@ -377,6 +429,7 @@ const DASHBOARD_HTML = `<!doctype html>
   </header>
 
   <div id="banner" class="banner unknown" role="status">Checking services…</div>
+  <div id="driver"></div>
 
   <h2>Services</h2>
   <div id="services" class="grid" aria-live="polite"></div>
@@ -414,6 +467,7 @@ const DASHBOARD_HTML = `<!doctype html>
 
   function renderStatus(data) {
     var banner = $('banner');
+    $('driver').textContent = data.queue_driver ? 'queue driver: ' + data.queue_driver : '';
     if (data.ok) {
       banner.className = 'banner ok';
       banner.textContent = 'All systems operational';

@@ -639,10 +639,13 @@ GEARMAN_PORT=4730
   redis driver keeps LLEN. `/api/status` gains a `gearmand` service probe
   (TCP connect + status parse) shown only when the driver is gearman; the
   dashboard labels the active queue driver.
-- New drill (RUNBOOK): kill gearmand → submissions still commit (rows
-  `pending`, flash warning — the existing post-commit degraded path),
-  workers idle-poll and reconnect, restart drains nothing (jobs submitted
-  while down were lost — rows stay `pending`, replay per RUNBOOK).
+- New drill (RUNBOOK), semantics as verified live: kill gearmand →
+  submissions still commit and `Queue::push` falls back to the redis lists
+  at push time (`queue.driver_fallback` per job — NO user-facing
+  degradation; the flash-warning path only fires when Redis is also down).
+  Workers notice gearmand is gone, consume the redis fallback lists via
+  BLPOP until it returns (nothing stuck, nothing lost), then re-register
+  with gearmand and subsequent pushes ride gearman again.
 
 ### Sessions: MySQL (SESSION_DRIVER)
 

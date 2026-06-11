@@ -224,27 +224,29 @@ echo 'pdf worker started (instance ' . instance_id() . ')' . PHP_EOL;
 Metrics::increment('worker.pdf.start');
 heartbeat(instance_id());
 
-$redisDown = false;
+// Driver-agnostic consume (redis BLPOP or gearman grab — see WorkerLoop).
+$consumer = new WorkerLoop(Queue::QUEUE_PDF);
+$queueDown = false;
 
 while ($running) {
     heartbeat(instance_id());
 
     try {
-        $job = Queue::pop(Queue::QUEUE_PDF, 5);
-    } catch (RedisException $e) {
+        $job = $consumer->next(5);
+    } catch (RedisException | GearmanException $e) {
         if (!$running) {
             break; // signal interrupted the blocking pop during shutdown
         }
-        if (!$redisDown) {
-            $redisDown = true; // log once per outage, not every retry
-            worker_log('redis unavailable, retrying until it returns: ' . $e->getMessage());
+        if (!$queueDown) {
+            $queueDown = true; // log once per outage, not every retry
+            worker_log('queue backend unavailable, retrying until it returns: ' . $e->getMessage());
         }
         sleep(3);
         continue;
     }
-    if ($redisDown) {
-        $redisDown = false;
-        worker_log('redis connection restored');
+    if ($queueDown) {
+        $queueDown = false;
+        worker_log('queue backend connection restored');
     }
 
     if ($job === null) {
@@ -258,6 +260,9 @@ while ($running) {
     $jobStart = microtime(true);
     $outcome = pdf_handle_job($job);
     $jobEnd = microtime(true);
+    // ALWAYS ack the gearman handle (no-op on redis): retries/dead-letters
+    // are our own re-push semantics — gearmand must not redeliver.
+    $consumer->finish();
 
     $spanSubmissionId = (int) ($job['submission_id'] ?? 0);
     $spanAttempt = (int) ($job['attempt'] ?? 0);

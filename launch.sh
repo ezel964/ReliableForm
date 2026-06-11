@@ -4,12 +4,17 @@
 #   bash launch.sh [start|stop|restart|status|logs <name>] [--yes|-y]
 #
 # Services: web1 web2 status worker-pdf worker-email worker-webhook nginx
-# MySQL and Redis are system services — launch.sh starts them if needed but
-# `stop` never touches them.
+# gearmand (queue driver = gearman only). MySQL and Redis are system
+# services — launch.sh starts them if needed but `stop` never touches them.
 #
 # Web runtime (WEB_RUNTIME=auto|fpm|cli, env var overrides .env): fpm runs
 # web1/web2 as two independent php-fpm masters on the same ports; cli keeps
 # the php -S dev servers. auto picks fpm when a php-fpm binary is found.
+#
+# Queue driver (QUEUE_DRIVER=auto|gearman|redis, env var overrides .env):
+# gearman runs a launch.sh-managed gearmand on GEARMAN_HOST:GEARMAN_PORT;
+# redis keeps the queue:* lists. auto picks gearman when a gearmand binary
+# is found. Resolved ONCE here and exported to every service.
 #
 # bash 3.2 compatible. Errors handled explicitly (no set -e).
 
@@ -26,7 +31,7 @@ NGINX_CONF="$RUN_DIR/nginx.conf"
 # these (adding a worker here is the ONLY list edit needed).
 WORKER_SERVICES="worker-pdf worker-email worker-webhook"
 APP_SERVICES="web1 web2 status $WORKER_SERVICES otel"
-ALL_SERVICES="$APP_SERVICES nginx"
+ALL_SERVICES="$APP_SERVICES nginx gearmand"
 
 # ---------------------------------------------------------------------------
 # Argument parsing
@@ -36,7 +41,7 @@ LOG_TARGET=""
 KILL_TARGET=""
 usage() {
     echo "usage: bash launch.sh [start|stop|restart|status|logs <name>|kill <name>] [--yes|-y]"
-    echo "       service names: web1 web2 status worker-pdf worker-email worker-webhook nginx"
+    echo "       service names: web1 web2 status worker-pdf worker-email worker-webhook nginx gearmand"
     echo "       kill = chaos-kill one service (whole process tree); start brings it back"
 }
 for arg in "$@"; do
@@ -74,6 +79,8 @@ WEB2_PORT="$(env_get WEB2_PORT 9002)"
 STATUS_PORT="$(env_get STATUS_PORT 9301)"
 REDIS_HOST="$(env_get REDIS_HOST 127.0.0.1)"
 REDIS_PORT="$(env_get REDIS_PORT 6379)"
+GEARMAN_HOST="$(env_get GEARMAN_HOST 127.0.0.1)"
+GEARMAN_PORT="$(env_get GEARMAN_PORT 4730)"
 OTEL_ENDPOINT="$(env_get OTEL_EXPORTER_OTLP_ENDPOINT "")"
 
 # Stage 2 runtime knobs. Real env vars override .env (`WEB_RUNTIME=cli bash
@@ -154,14 +161,51 @@ effective_web_mode() {
     fi
 }
 
+# gearmand discovery: Homebrew links it into <prefix>/sbin (often not in a
+# user's PATH); apt's gearman-job-server installs /usr/sbin/gearmand. Keep in
+# sync with setup.sh.
+find_gearmand() {
+    local p=""
+    if have gearmand; then
+        command -v gearmand
+        return 0
+    fi
+    for p in /usr/local/sbin/gearmand /opt/homebrew/sbin/gearmand /usr/sbin/gearmand; do
+        if [ -x "$p" ]; then printf '%s\n' "$p"; return 0; fi
+    done
+    if have brew; then
+        p="$(brew --prefix gearman 2>/dev/null)/sbin/gearmand"
+        if [ -x "$p" ]; then printf '%s\n' "$p"; return 0; fi
+    fi
+    return 1
+}
+
 # QUEUE_DRIVER is resolved ONCE here and exported to every service started
 # below, so web and workers can never disagree mid-run (auto: gearmand binary
 # present => gearman, else redis). Services never see the literal "auto".
-if [ "$QUEUE_DRIVER_CFG" = "auto" ] || [ -z "$QUEUE_DRIVER_CFG" ]; then
-    if have gearmand; then QUEUE_DRIVER_RESOLVED="gearman"; else QUEUE_DRIVER_RESOLVED="redis"; fi
-else
-    QUEUE_DRIVER_RESOLVED="$QUEUE_DRIVER_CFG"
-fi
+GEARMAND_BIN="$(find_gearmand)" || GEARMAND_BIN=""
+case "$QUEUE_DRIVER_CFG" in
+    auto|"")
+        if [ -n "$GEARMAND_BIN" ]; then QUEUE_DRIVER_RESOLVED="gearman"; else QUEUE_DRIVER_RESOLVED="redis"; fi
+        ;;
+    *)
+        # gearman|redis pass through; anything else is rejected in cmd_start
+        # (status/logs/stop must keep working with a junk value in .env).
+        QUEUE_DRIVER_RESOLVED="$QUEUE_DRIVER_CFG"
+        ;;
+esac
+
+# Driver the RUNNING stack actually uses: the marker cmd_start writes wins
+# (the status service and tests read the same file); fresh resolution is the
+# fallback when the stack was never started.
+effective_queue_driver() {
+    local d=""
+    d="$(tr -d '[:space:]' < "$RUN_DIR/queue-driver" 2>/dev/null)"
+    case "$d" in
+        gearman|redis) printf '%s' "$d"; return 0 ;;
+    esac
+    printf '%s' "$QUEUE_DRIVER_RESOLVED"
+}
 
 # ---------------------------------------------------------------------------
 # PID helpers
@@ -409,9 +453,72 @@ start_nginx() {
     return 1
 }
 
+# gearmand lifecycle — like nginx: the daemon detaches itself and writes
+# storage/run/gearmand.pid (per the flags below); that pid file is the source
+# of truth, never $!. Flags verified against `gearmand --help` (1.1.22):
+# -d/--daemon, --listen, --port (Gear section), --pid-file, --log-file.
+start_gearmand() {
+    local pidfile="$RUN_DIR/gearmand.pid" p="" i=0
+    if [ -f "$pidfile" ]; then
+        p="$(tr -d '[:space:]' < "$pidfile" 2>/dev/null)"
+    fi
+    if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then
+        ok "gearmand already running (pid $p)"
+        return 0
+    fi
+    rm -f "$pidfile"
+    if ! "$GEARMAND_BIN" -d --listen "$GEARMAN_HOST" --port "$GEARMAN_PORT" \
+        --pid-file "$pidfile" --log-file "$LOG_DIR/gearmand.log"; then
+        err "gearmand failed to start — check storage/logs/gearmand.log"
+        return 1
+    fi
+    while [ $i -lt 30 ]; do
+        if [ -s "$pidfile" ]; then
+            p="$(tr -d '[:space:]' < "$pidfile" 2>/dev/null)"
+            if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then
+                info "gearmand starting (pid $p) — $GEARMAN_HOST:$GEARMAN_PORT, log: storage/logs/gearmand.log"
+                return 0
+            fi
+        fi
+        sleep 0.1
+        i=$((i + 1))
+    done
+    err "gearmand did not write a live pid to storage/run/gearmand.pid within 3s — check storage/logs/gearmand.log"
+    return 1
+}
+
 # ---------------------------------------------------------------------------
 # Readiness checks
 # ---------------------------------------------------------------------------
+
+# One admin "status" roundtrip (text protocol) — 0 when gearmand answers
+# through the terminating "." line. php is the stack's lingua franca (no nc
+# dependency); a 2s socket timeout bounds the probe.
+gearmand_status_ok() {
+    have php || return 1
+    php -r '
+        $s = @stream_socket_client("tcp://{$argv[1]}:{$argv[2]}", $e, $m, 2);
+        if ($s === false) { exit(1); }
+        stream_set_timeout($s, 2);
+        fwrite($s, "status\n");
+        while (($l = fgets($s)) !== false) {
+            if (rtrim($l, "\r\n") === ".") { exit(0); }
+        }
+        exit(1);
+    ' "$GEARMAN_HOST" "$GEARMAN_PORT" >/dev/null 2>&1
+}
+
+wait_gearmand_ready() { # $1 budget-seconds → 0 ready / 1 not
+    local budget="$1" start="$SECONDS"
+    while :; do
+        gearmand_status_ok && return 0
+        if [ $((SECONDS - start)) -ge "$budget" ]; then
+            return 1
+        fi
+        sleep 0.5
+    done
+}
+
 wait_http_ready() { # $1 url, $2 budget-seconds → echoes last code; 0 iff 200
     local url="$1" budget="$2" start="$SECONDS" code="000"
     while :; do
@@ -521,6 +628,28 @@ cmd_start() {
     else
         info "web runtime: cli — php -S (WEB_RUNTIME=$WEB_RUNTIME_CFG)"
     fi
+
+    # Queue driver — resolved once at the top of the file; validated and
+    # announced here, mirroring the web-runtime line.
+    case "$QUEUE_DRIVER_CFG" in
+        auto|""|gearman|redis) ;;
+        *)
+            err "invalid QUEUE_DRIVER '$QUEUE_DRIVER_CFG' (use auto|gearman|redis)"
+            exit 1
+            ;;
+    esac
+    if [ "$QUEUE_DRIVER_RESOLVED" = "gearman" ] && [ -z "$GEARMAND_BIN" ]; then
+        err "QUEUE_DRIVER=gearman but no gearmand binary found (looked for: gearmand in PATH, /usr/local/sbin, /opt/homebrew/sbin, /usr/sbin, brew prefix)."
+        err "Install it (brew install gearman · sudo apt-get install gearman-job-server) or set QUEUE_DRIVER=redis."
+        exit 1
+    fi
+    if [ "$QUEUE_DRIVER_RESOLVED" = "gearman" ]; then
+        info "queue driver: gearman — gearmand $GEARMAN_HOST:$GEARMAN_PORT (QUEUE_DRIVER=${QUEUE_DRIVER_CFG:-auto})"
+    elif [ "$QUEUE_DRIVER_CFG" = "auto" ] || [ -z "$QUEUE_DRIVER_CFG" ]; then
+        info "queue driver: redis (QUEUE_DRIVER=auto, no gearmand binary found)"
+    else
+        info "queue driver: redis (QUEUE_DRIVER=$QUEUE_DRIVER_CFG)"
+    fi
     # Resolved queue driver for every service started below (see top of file).
     QUEUE_DRIVER="$QUEUE_DRIVER_RESOLVED"
     export QUEUE_DRIVER
@@ -611,12 +740,17 @@ cmd_start() {
     rm -f "$RUN_DIR/nginx-validate.out"
     ok "nginx config rendered + validated (storage/run/nginx.conf + nginx-web.inc, $WEB_MODE mode)"
 
-    # Record the resolved mode for tooling that probes the running stack
-    # (launch.sh status, tests/e2e.sh) — the config alone can't tell them
-    # what an already-running stack was started with.
+    # Record the resolved mode/driver for tooling that probes the running
+    # stack (launch.sh status, the status service, tests/e2e.sh) — the config
+    # alone can't tell them what an already-running stack was started with.
     printf '%s\n' "$WEB_MODE" > "$RUN_DIR/web-runtime"
+    printf '%s\n' "$QUEUE_DRIVER_RESOLVED" > "$RUN_DIR/queue-driver"
 
     # --- start everything -------------------------------------------------
+    # gearmand first: the workers register with it as soon as they boot.
+    if [ "$QUEUE_DRIVER_RESOLVED" = "gearman" ]; then
+        start_gearmand || fails=$((fails + 1))
+    fi
     for name in $APP_SERVICES; do
         start_app_service "$name" || fails=$((fails + 1))
     done
@@ -635,6 +769,19 @@ cmd_start() {
         [ "$left" -lt 2 ] && left=2
         printf '%s' "$left"
     }
+
+    # gearmand readiness: pid alive + the admin "status" command answers.
+    if [ "$QUEUE_DRIVER_RESOLVED" = "gearman" ]; then
+        if is_running gearmand && wait_gearmand_ready "$(budget_left)"; then
+            add_row "${C_GREEN}✓${C_RESET}" "gearmand" "pid $(pid_of gearmand) · admin status ok · $GEARMAN_HOST:$GEARMAN_PORT"
+        elif is_running gearmand; then
+            add_row "${C_RED}✗${C_RESET}" "gearmand" "pid $(pid_of gearmand) alive but admin status not answering — see storage/logs/gearmand.log"
+            fails=$((fails + 1))
+        else
+            add_row "${C_RED}✗${C_RESET}" "gearmand" "process died — see storage/logs/gearmand.log"
+            fails=$((fails + 1))
+        fi
+    fi
 
     # The four /healthz targets. fpm pools speak FastCGI, not HTTP — they are
     # probed through the LB's per-pool routes; cli mode keeps direct probes.
@@ -707,7 +854,7 @@ cmd_start() {
         printf '%s' "${C_RESET}"
         info "status page  http://localhost:$LB_PORT/status"
         info "demo login   demo@reliableform.dev / demo1234"
-        info "logs         bash launch.sh logs web1   (web1|web2|status|worker-pdf|worker-email|worker-webhook|nginx)"
+        info "logs         bash launch.sh logs web1   (web1|web2|status|worker-pdf|worker-email|worker-webhook|nginx|gearmand)"
         info "stop         bash launch.sh stop"
         exit 0
     else
@@ -768,6 +915,10 @@ cmd_stop() {
     # nginx wrote storage/run/nginx.pid itself; TERM on the master is the
     # same as `nginx -s stop -c <conf>` without needing the binary.
     stop_service nginx
+    # gearmand is launch.sh-managed too (unlike MySQL/Redis) — its in-memory
+    # queue dies with it, which is fine: jobs are re-derivable from the
+    # pending DB rows and the stack is going down anyway.
+    stop_service gearmand
     rm -f "$RUN_DIR/nginx-validate.out"
     info "MySQL and Redis are system services — left running (stop them yourself if you want)."
     exit 0
@@ -777,10 +928,12 @@ cmd_stop() {
 # status
 # ---------------------------------------------------------------------------
 cmd_status() {
-    local name="" p="" code="" hb="" detail="" sym="" mode=""
+    local name="" p="" code="" hb="" detail="" sym="" mode="" qdriver=""
     mode="$(effective_web_mode)"
+    qdriver="$(effective_queue_driver)"
     info "${C_BOLD}ReliableForm — service status${C_RESET}"
     info "web runtime: $mode"
+    info "queue driver: $qdriver"
     echo ""
     printf '  %s %-14s %-10s %s\n' " " "SERVICE" "PID" "DETAIL"
     for name in $ALL_SERVICES; do
@@ -803,6 +956,14 @@ cmd_status() {
                     fi ;;
                 status) code="$(http_code "http://127.0.0.1:$STATUS_PORT/healthz")"; detail="healthz $code · http://127.0.0.1:$STATUS_PORT" ;;
                 nginx)  code="$(http_code "http://127.0.0.1:$LB_PORT/healthz")";     detail="LB healthz $code · http://localhost:$LB_PORT" ;;
+                gearmand)
+                    if gearmand_status_ok; then
+                        detail="admin status ok · $GEARMAN_HOST:$GEARMAN_PORT"
+                    else
+                        detail="not answering admin status on $GEARMAN_HOST:$GEARMAN_PORT"
+                        sym="${C_YELLOW}!${C_RESET}"
+                    fi
+                    ;;
                 worker-*|otel)
                     hb="$(heartbeat_value "$name")"
                     if [ -n "$hb" ]; then
@@ -828,6 +989,8 @@ cmd_status() {
         else
             if [ "$name" = "otel" ] && [ -z "$OTEL_ENDPOINT" ]; then
                 printf '  %s %-14s %-10s %s\n' "${C_YELLOW}·${C_RESET}" "$name" "-" "disabled (set OTEL_EXPORTER_OTLP_ENDPOINT in .env to enable)"
+            elif [ "$name" = "gearmand" ] && [ "$qdriver" != "gearman" ]; then
+                printf '  %s %-14s %-10s %s\n' "${C_YELLOW}·${C_RESET}" "$name" "-" "not used (queue driver: $qdriver)"
             else
                 printf '  %s %-14s %-10s %s\n' "${C_RED}✗${C_RESET}" "$name" "-" "stopped"
             fi
@@ -863,7 +1026,7 @@ cmd_logs() {
             # fpm masters also keep a slowlog (requests > 2s) next to it.
             [ -f "$LOG_DIR/$LOG_TARGET-slow.log" ] && f2="$LOG_DIR/$LOG_TARGET-slow.log"
             ;;
-        status|worker-*|otel)
+        status|worker-*|otel|gearmand)
             f1="$LOG_DIR/$LOG_TARGET.log"
             ;;
         nginx)

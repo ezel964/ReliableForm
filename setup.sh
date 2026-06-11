@@ -159,6 +159,52 @@ check_php_fpm() {
     return 0
 }
 
+# gearmand discovery — keep in sync with launch.sh.
+find_gearmand() {
+    local p=""
+    if have gearmand; then
+        command -v gearmand
+        return 0
+    fi
+    for p in /usr/local/sbin/gearmand /opt/homebrew/sbin/gearmand /usr/sbin/gearmand; do
+        if [ -x "$p" ]; then printf '%s\n' "$p"; return 0; fi
+    done
+    if have brew; then
+        p="$(brew --prefix gearman 2>/dev/null)/sbin/gearmand"
+        if [ -x "$p" ]; then printf '%s\n' "$p"; return 0; fi
+    fi
+    return 1
+}
+
+# gearmand is OPTIONAL: QUEUE_DRIVER=auto falls back to the redis queue
+# driver, so this never fails setup — it informs and offers the install
+# (production parity: the reference stack queues jobs through gearmand).
+check_gearmand() {
+    local bin="" pkg=""
+    bin="$(find_gearmand)" || bin=""
+    if [ -n "$bin" ]; then
+        ok "gearmand ($bin) — queue runs in gearman mode under QUEUE_DRIVER=auto"
+        return 0
+    fi
+    info "gearmand not found — QUEUE_DRIVER=auto falls back to the redis queue driver; the stack still works."
+    pkg=""
+    if [ "$PKG_MANAGER" = "brew" ]; then
+        pkg="gearman"
+    elif [ "$PKG_MANAGER" = "apt" ]; then
+        pkg="gearman-job-server"
+    fi
+    if [ -n "$pkg" ] && pkg_install "$pkg"; then
+        hash -r 2>/dev/null
+        bin="$(find_gearmand)" || bin=""
+        if [ -n "$bin" ]; then
+            ok "gearmand installed ($bin)"
+        else
+            warn "gearmand still not found after installing $pkg — launch.sh will use the redis queue driver."
+        fi
+    fi
+    return 0
+}
+
 PHP_READY=0;   check_dep php   "PHP >= 8.1 with pdo_mysql"        php_ok          "PHP runs the web tier, both workers and the DB probe." || PHP_READY=1
 NODE_READY=0;  check_dep node  "Node.js >= 18"                    node_ok         "Node runs the status & analytics service." || NODE_READY=1
 NPM_READY=0
@@ -171,6 +217,7 @@ MYSQL_READY=0; check_dep mysql "MySQL client + server"            mysql_client_o
 REDIS_READY=0; check_dep redis "Redis"                            redis_ok        "Redis backs sessions, caches, queues and worker heartbeats." || REDIS_READY=1
 NGINX_READY=0; check_dep nginx "Nginx"                            nginx_ok        "Nginx is the load balancer / front door on port 8080." || NGINX_READY=1
 check_php_fpm
+check_gearmand
 
 # php and mysql are required to bootstrap the database — bail out if missing.
 if [ "$PHP_READY" -ne 0 ]; then
