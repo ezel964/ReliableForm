@@ -1,0 +1,89 @@
+# ReliableForm load balancer. Rendered by launch.sh (sed replaces {{...}})
+# into storage/run/nginx.conf and started unprivileged:
+#   nginx -c <root>/storage/run/nginx.conf
+# launch.sh must create storage/run/nginx_tmp/* before starting nginx.
+
+worker_processes 1;
+error_log {{ROOT}}/storage/logs/nginx-error.log warn;
+pid {{ROOT}}/storage/run/nginx.pid;
+
+events {
+    worker_connections 256;
+}
+
+http {
+    types {
+        text/html html htm;
+        text/css css;
+        application/javascript js;
+        application/json json;
+        image/png png;
+        image/jpeg jpg jpeg;
+        image/svg+xml svg;
+        image/x-icon ico;
+        application/pdf pdf;
+        text/plain txt;
+        font/woff2 woff2;
+    }
+    default_type application/octet-stream;
+
+    log_format sre '$remote_addr [$time_local] "$request" $status $body_bytes_sent '
+                   'rt=$request_time upstream=$upstream_addr urt=$upstream_response_time '
+                   'rid=$request_id';
+    access_log {{ROOT}}/storage/logs/nginx-access.log sre;
+
+    client_body_temp_path {{ROOT}}/storage/run/nginx_tmp/client_body;
+    proxy_temp_path {{ROOT}}/storage/run/nginx_tmp/proxy;
+    fastcgi_temp_path {{ROOT}}/storage/run/nginx_tmp/fastcgi;
+    uwsgi_temp_path {{ROOT}}/storage/run/nginx_tmp/uwsgi;
+    scgi_temp_path {{ROOT}}/storage/run/nginx_tmp/scgi;
+
+    sendfile on;
+    keepalive_timeout 65;
+    client_max_body_size 2m;
+
+    # The web tier: two identical PHP app instances.
+    upstream web_backend {
+        least_conn;
+        server 127.0.0.1:{{WEB1_PORT}} max_fails=3 fail_timeout=5s;
+        server 127.0.0.1:{{WEB2_PORT}} max_fails=3 fail_timeout=5s;
+    }
+
+    server {
+        listen {{LB_PORT}};
+        server_name _;
+
+        proxy_connect_timeout 3s;
+        proxy_read_timeout 15s;
+        proxy_send_timeout 15s;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Request-Id $request_id;
+
+        location = /favicon.ico {
+            access_log off;
+            return 204;
+        }
+
+        # Static assets straight from disk — the web tier never sees them.
+        location /assets/ {
+            root {{ROOT}}/apps/web/public;
+            expires 5m;
+        }
+
+        # Node status & analytics service.
+        location /status {
+            proxy_pass http://127.0.0.1:{{STATUS_PORT}};
+        }
+        location /api/ {
+            proxy_pass http://127.0.0.1:{{STATUS_PORT}};
+        }
+
+        # Everything else: the PHP web tier, load balanced.
+        location / {
+            proxy_pass http://web_backend;
+            proxy_next_upstream error timeout http_502 http_503;
+        }
+    }
+}

@@ -1,0 +1,88 @@
+<?php
+
+declare(strict_types=1);
+
+/**
+ * @var list<array<string,mixed>> $forms
+ * @var string $apiKey
+ */
+$apiBase = rtrim((string) Config::get('APP_URL', 'http://localhost:8080'), '/');
+$curlExample = 'curl -H "Authorization: Bearer ' . $apiKey . '" ' . $apiBase . '/v1/forms';
+?>
+<div class="page-head">
+  <h1>Your forms</h1>
+  <a class="btn btn-primary" href="/forms/new">+ New form</a>
+</div>
+
+<?php if ($forms === []): ?>
+  <div class="card empty-state">
+    <h2>No forms yet</h2>
+    <p>Create your first form and share its public link — responses will show up here.</p>
+    <p><a class="btn btn-primary" href="/forms/new">Create a form</a></p>
+  </div>
+<?php else: ?>
+  <div class="card table-card">
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Form</th>
+          <th>Submissions</th>
+          <th>Public link</th>
+          <th class="th-actions">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        <?php foreach ($forms as $form): ?>
+          <?php $url = public_form_url((string) $form['public_id']); ?>
+          <tr>
+            <td>
+              <strong><?= e((string) $form['title']) ?></strong>
+              <div class="muted small">created <?= e((string) $form['created_at']) ?></div>
+            </td>
+            <td>
+              <a href="/forms/<?= (int) $form['id'] ?>/submissions">
+                <?= (int) $form['submission_count'] ?> submission<?= (int) $form['submission_count'] === 1 ? '' : 's' ?>
+              </a>
+            </td>
+            <td class="cell-link">
+              <a href="<?= e($url) ?>" target="_blank" rel="noopener">/f/<?= e((string) $form['public_id']) ?></a>
+              <button type="button" class="btn btn-ghost btn-small" data-copy="<?= e($url) ?>">Copy</button>
+            </td>
+            <td class="cell-actions">
+              <a class="btn btn-ghost btn-small" href="/forms/<?= (int) $form['id'] ?>/edit">Edit</a>
+              <form method="post" action="/forms/<?= (int) $form['id'] ?>/delete" class="inline-form"
+                    data-confirm="Delete &quot;<?= e((string) $form['title']) ?>&quot; and all of its submissions?">
+                <?= Csrf::field() ?>
+                <button type="submit" class="btn btn-danger btn-small">Delete</button>
+              </form>
+            </td>
+          </tr>
+        <?php endforeach; ?>
+      </tbody>
+    </table>
+  </div>
+<?php endif; ?>
+
+<div class="card">
+  <h2>API access</h2>
+  <p class="muted small">Use this key with the REST API v1 (<code>Authorization: Bearer …</code> or <code>X-Api-Key</code>).</p>
+  <div class="form-row">
+    <label for="api-key">Your API key</label>
+    <div style="display:flex;gap:10px;align-items:center">
+      <input id="api-key" class="input" type="text" readonly
+             value="<?= e($apiKey) ?>"
+             style="font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">
+      <button type="button" class="btn btn-ghost btn-small" data-copy="<?= e($apiKey) ?>">Copy</button>
+    </div>
+  </div>
+  <div class="form-row">
+    <label>Example</label>
+    <p class="break"><code><?= e($curlExample) ?></code></p>
+  </div>
+  <form method="post" action="/account/api-key" class="inline-form"
+        data-confirm="Regenerate your API key? The current key stops working immediately.">
+    <?= Csrf::field() ?>
+    <button type="submit" class="btn btn-danger btn-small">Regenerate</button>
+  </form>
+  <p class="hint">Regenerating invalidates the old key immediately — update any integrations that use it.</p>
+</div>

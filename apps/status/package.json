@@ -1,0 +1,13 @@
+{
+  "name": "reliableform-status",
+  "private": true,
+  "type": "commonjs",
+  "description": "ReliableForm status & analytics service",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "mysql2": "^3"
+  }
+}

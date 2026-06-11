@@ -1,0 +1,7 @@
+.env
+apps/status/node_modules/
+storage/logs/
+storage/run/
+storage/pdfs/
+storage/mail/
+.DS_Store
