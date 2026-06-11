@@ -107,6 +107,58 @@ redis_ok()        { have redis-cli || have redis-server; }
 nginx_ok()        { find_nginx >/dev/null; }
 npm_ok()          { have npm; }
 
+# php-fpm discovery, in contract order. Keep in sync with launch.sh.
+find_php_fpm() {
+    local p=""
+    if have php-fpm; then
+        command -v php-fpm
+        return 0
+    fi
+    if have php; then
+        p="$(dirname "$(command -v php)")/../sbin/php-fpm"
+        if [ -x "$p" ]; then printf '%s\n' "$p"; return 0; fi
+    fi
+    if have brew; then
+        p="$(brew --prefix php 2>/dev/null)/sbin/php-fpm"
+        if [ -x "$p" ]; then printf '%s\n' "$p"; return 0; fi
+    fi
+    # apt ships php-fpm as a separate php8.x-fpm package under /usr/sbin.
+    for p in /usr/sbin/php-fpm8*; do
+        if [ -x "$p" ]; then printf '%s\n' "$p"; return 0; fi
+    done
+    return 1
+}
+
+# php-fpm is OPTIONAL: WEB_RUNTIME=auto falls back to php -S without it, so
+# this never fails setup — it informs and (on apt) offers the package.
+check_php_fpm() {
+    local fpm_bin="" php_mm="" pkg=""
+    fpm_bin="$(find_php_fpm)" || fpm_bin=""
+    if [ -n "$fpm_bin" ]; then
+        ok "php-fpm ($fpm_bin) — web tier runs in FPM mode under WEB_RUNTIME=auto"
+        return 0
+    fi
+    info "php-fpm not found — WEB_RUNTIME=auto falls back to php -S (cli mode); the stack still works."
+    if [ "$PKG_MANAGER" = "apt" ] && have php; then
+        php_mm="$(php -r 'echo PHP_MAJOR_VERSION . "." . PHP_MINOR_VERSION;' 2>/dev/null)"
+        if [ -n "$php_mm" ]; then
+            pkg="php${php_mm}-fpm"
+            if pkg_install "$pkg"; then
+                hash -r 2>/dev/null
+                fpm_bin="$(find_php_fpm)" || fpm_bin=""
+                if [ -n "$fpm_bin" ]; then
+                    ok "php-fpm installed ($fpm_bin)"
+                else
+                    warn "php-fpm still not found after installing $pkg — launch.sh will use cli mode."
+                fi
+            fi
+        fi
+    elif [ "$PKG_MANAGER" = "brew" ]; then
+        info "Homebrew ships php-fpm with the php formula — 'brew install php' provides it."
+    fi
+    return 0
+}
+
 PHP_READY=0;   check_dep php   "PHP >= 8.1 with pdo_mysql"        php_ok          "PHP runs the web tier, both workers and the DB probe." || PHP_READY=1
 NODE_READY=0;  check_dep node  "Node.js >= 18"                    node_ok         "Node runs the status & analytics service." || NODE_READY=1
 NPM_READY=0
@@ -118,6 +170,7 @@ fi
 MYSQL_READY=0; check_dep mysql "MySQL client + server"            mysql_client_ok "MySQL stores users, forms, submissions and job rows." || MYSQL_READY=1
 REDIS_READY=0; check_dep redis "Redis"                            redis_ok        "Redis backs sessions, caches, queues and worker heartbeats." || REDIS_READY=1
 NGINX_READY=0; check_dep nginx "Nginx"                            nginx_ok        "Nginx is the load balancer / front door on port 8080." || NGINX_READY=1
+check_php_fpm
 
 # php and mysql are required to bootstrap the database — bail out if missing.
 if [ "$PHP_READY" -ne 0 ]; then

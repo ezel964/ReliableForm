@@ -80,10 +80,10 @@ http {
             proxy_pass http://127.0.0.1:{{STATUS_PORT}};
         }
 
-        # Everything else: the PHP web tier, load balanced.
-        location / {
-            proxy_pass http://web_backend;
-            proxy_next_upstream error timeout http_502 http_503;
-        }
+        # Web tier routing lives in a runtime-specific include: launch.sh
+        # renders config/nginx.web-fpm.inc.template (php-fpm pools) or
+        # config/nginx.web-proxy.inc.template (php -S) to {{WEB_INC}}
+        # depending on the resolved WEB_RUNTIME.
+        include {{WEB_INC}};
     }
 }

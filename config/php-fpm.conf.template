@@ -1,0 +1,39 @@
+; ReliableForm PHP-FPM pool — ONE independent master per web instance so the
+; kill drills stay per-instance. Rendered by launch.sh (sed replaces {{...}})
+; into storage/run/fpm-<name>.conf and started with:
+;   php-fpm -y <root>/storage/run/fpm-<name>.conf
+; The master daemonizes and writes the pid file itself — lifecycle is driven
+; from that file (exactly like nginx), never from $!.
+
+[global]
+pid = {{ROOT}}/storage/run/{{NAME}}.pid
+error_log = {{ROOT}}/storage/logs/{{NAME}}.log
+daemonize = yes
+
+[{{NAME}}]
+listen = 127.0.0.1:{{PORT}}
+listen.allowed_clients = 127.0.0.1
+
+pm = dynamic
+pm.max_children = 6
+pm.start_servers = 2
+pm.min_spare_servers = 1
+pm.max_spare_servers = 3
+; pm saturation / listen queue are first-class SLI surfaces — exposed to
+; localhost through the LB as /__pool/{{NAME}}/fpm-status (?json supported).
+pm.status_path = /fpm-status
+
+request_slowlog_timeout = 2s
+slowlog = {{ROOT}}/storage/logs/{{NAME}}-slow.log
+catch_workers_output = yes
+
+; Same env contract the cli runtime gets from launch.sh (php -S inherits its
+; exports; fpm clears the environment, so the keys are pinned here).
+; QUEUE_DRIVER is rendered in by launch.sh as the RESOLVED driver — fpm's own
+; $VAR expansion is skipped on purpose: it fails the config parse when the
+; variable is absent from the master's environment.
+env[INSTANCE_ID] = {{NAME}}
+env[PORT] = {{PORT}}
+env[QUEUE_DRIVER] = {{QUEUE_DRIVER}}
+
+php_admin_flag[display_errors] = off

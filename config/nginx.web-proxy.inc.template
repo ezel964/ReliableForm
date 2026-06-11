@@ -1,0 +1,20 @@
+# Web tier include — proxy (cli) mode: the php -S instances speak plain HTTP.
+# Rendered by launch.sh into storage/run/nginx-web.inc and pulled into the
+# server block of the main conf via `include {{WEB_INC}};`. The fpm-mode
+# sibling is config/nginx.web-fpm.inc.template — both expose the same URLs.
+
+# Per-pool health probes: one specific instance each, NOT the upstream.
+# launch.sh readiness and the status service use these in BOTH modes (direct
+# :PORT probes die under fpm, so the URLs must exist here too).
+location = /__pool/web1/healthz {
+    proxy_pass http://127.0.0.1:{{WEB1_PORT}}/healthz;
+}
+location = /__pool/web2/healthz {
+    proxy_pass http://127.0.0.1:{{WEB2_PORT}}/healthz;
+}
+
+# Everything else: the PHP web tier, load balanced.
+location / {
+    proxy_pass http://web_backend;
+    proxy_next_upstream error timeout http_502 http_503;
+}

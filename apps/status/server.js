@@ -8,6 +8,8 @@
 
 const http = require('http');
 const dgram = require('dgram');
+const fs = require('fs');
+const path = require('path');
 const { performance } = require('perf_hooks');
 const env = require('./env');
 const { RedisClient } = require('./redis');
@@ -17,13 +19,16 @@ const applog = require('./applog');
 const INSTANCE = process.env.INSTANCE_ID || 'status';
 const STATUS_PORT = env.getInt('STATUS_PORT');
 const LB_PORT = env.getInt('LB_PORT');
-const WEB1_PORT = env.getInt('WEB1_PORT');
-const WEB2_PORT = env.getInt('WEB2_PORT');
 const STATSD_HOST = env.get('STATSD_HOST');
 const STATSD_PORT = env.getInt('STATSD_PORT');
 
 const PROBE_TIMEOUT_MS = 2000;
+const FPM_STATUS_TIMEOUT_MS = 1000;
 const QUEUE_WARN_DEPTH = 100;
+
+// launch.sh records the resolved WEB_RUNTIME (fpm|cli) here on every start —
+// the only reliable way to know what the RUNNING web tier was started with.
+const WEB_RUNTIME_MARKER = path.join(env.PROJECT_ROOT, 'storage', 'run', 'web-runtime');
 
 // ---------------------------------------------------------------------------
 // MySQL — optional at runtime: the service must boot without npm install.
@@ -111,8 +116,8 @@ async function timedProbe(name, fn) {
   }
 }
 
-/** GET http://127.0.0.1:<port>/healthz with a hard timeout. Never rejects. */
-function httpProbe(port) {
+/** GET http://127.0.0.1:<port><path> with a hard timeout. Never rejects. */
+function httpProbe(port, probePath = '/healthz') {
   return new Promise((resolve) => {
     let settled = false;
     const done = (result) => {
@@ -122,7 +127,7 @@ function httpProbe(port) {
       }
     };
     const req = http.get(
-      { host: '127.0.0.1', port, path: '/healthz', timeout: PROBE_TIMEOUT_MS },
+      { host: '127.0.0.1', port, path: probePath, timeout: PROBE_TIMEOUT_MS },
       (res) => {
         res.resume();
         res.on('end', () => {
@@ -133,6 +138,75 @@ function httpProbe(port) {
     req.on('timeout', () => req.destroy(new Error('timeout')));
     req.on('error', (err) => done({ ok: false, detail: errDetail(err) }));
   });
+}
+
+/** Resolved web runtime as recorded by launch.sh ('' when unknown). */
+function webRuntime() {
+  try {
+    return fs.readFileSync(WEB_RUNTIME_MARKER, 'utf8').trim();
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Best-effort pool detail from the LB's /__pool/<name>/fpm-status?json route
+ * (fpm mode only). One extra localhost request with its own short timeout;
+ * any failure — timeout, non-200, bad JSON — just means no extra detail.
+ * It must never fail the health probe itself.
+ */
+function fpmPoolDetail(name) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (suffix) => {
+      if (!settled) {
+        settled = true;
+        resolve(suffix);
+      }
+    };
+    const req = http.get(
+      {
+        host: '127.0.0.1',
+        port: LB_PORT,
+        path: `/__pool/${name}/fpm-status?json`,
+        timeout: FPM_STATUS_TIMEOUT_MS,
+      },
+      (res) => {
+        if (res.statusCode !== 200) {
+          res.resume();
+          res.on('end', () => done(''));
+          return;
+        }
+        const chunks = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () => {
+          try {
+            const st = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+            const active = st['active processes'];
+            const queue = st['listen queue'];
+            if (active === undefined || queue === undefined) return done('');
+            done(` · fpm active=${active} queue=${queue}`);
+          } catch {
+            done('');
+          }
+        });
+      }
+    );
+    req.on('timeout', () => req.destroy(new Error('timeout')));
+    req.on('error', () => done(''));
+  });
+}
+
+/**
+ * web1/web2 probe. Direct :PORT probes die under php-fpm (FastCGI, not
+ * HTTP), so both runtimes are probed through the LB's per-pool routes.
+ */
+async function probeWebPool(name) {
+  const r = await httpProbe(LB_PORT, `/__pool/${name}/healthz`);
+  if (r.ok && webRuntime() === 'fpm') {
+    r.detail += await fpmPoolDetail(name);
+  }
+  return r;
 }
 
 async function probeMysql() {
@@ -164,8 +238,8 @@ async function buildStatus() {
   const start = process.hrtime.bigint();
   const services = await Promise.all([
     timedProbe('lb', () => httpProbe(LB_PORT)),
-    timedProbe('web1', () => httpProbe(WEB1_PORT)),
-    timedProbe('web2', () => httpProbe(WEB2_PORT)),
+    timedProbe('web1', () => probeWebPool('web1')),
+    timedProbe('web2', () => probeWebPool('web2')),
     timedProbe('status', async () => ({ ok: true, detail: 'self' })),
     timedProbe('mysql', probeMysql),
     timedProbe('redis', probeRedis),

@@ -345,19 +345,41 @@ else
 fi
 
 dd if=/dev/zero of="$TMP/big.txt" bs=1024 count=3072 2>/dev/null
-# Own jar bound to 127.0.0.1: the LB jar's cookies are scoped to "localhost"
-# and would not be sent to 127.0.0.1:9001 (CSRF would 419).
-BJAR="$TMP/big-jar.txt"
-BTOKEN="$(csrf_from "$BJAR" "http://127.0.0.1:$WEB1_PORT/f/$PUBLIC_ID")"
-CODE="$(curl -s -b "$BJAR" -c "$BJAR" -o "$TMP/neg2.html" -w '%{http_code}' \
-    -F "_token=$BTOKEN" \
-    -F "answers[f_text01]=Big Upload" \
-    -F "files[f_file01]=@$TMP/big.txt;type=text/plain" \
-    "http://127.0.0.1:$WEB1_PORT/f/$PUBLIC_ID")"
-if [ "$CODE" = "200" ] && grep -q 'File too large (2 MB max).' "$TMP/neg2.html"; then
-    pass "3MB upload direct to :$WEB1_PORT → friendly too-large error"
+# Runtime-aware: php -S answers plain HTTP on :$WEB1_PORT, php-fpm speaks
+# FastCGI only. launch.sh records the resolved mode in storage/run/web-runtime;
+# fall back to probing the port when the marker is missing.
+WEB_MODE="$(cat "$ROOT/storage/run/web-runtime" 2>/dev/null)"
+if [ "$WEB_MODE" != "cli" ] && [ "$WEB_MODE" != "fpm" ]; then
+    if curl -s -m 2 -o /dev/null "http://127.0.0.1:$WEB1_PORT/healthz"; then WEB_MODE=cli; else WEB_MODE=fpm; fi
+fi
+if [ "$WEB_MODE" = "fpm" ]; then
+    # No direct HTTP path to one instance under fpm — send the oversized POST
+    # through the LB and expect nginx's client_max_body_size (2m) to 413 it.
+    CODE="$(curl -s -b "$PJAR" -c "$PJAR" -o "$TMP/neg2.html" -w '%{http_code}' \
+        -F "_token=$PTOKEN" \
+        -F "answers[f_text01]=Big Upload" \
+        -F "files[f_file01]=@$TMP/big.txt;type=text/plain" \
+        "$LB/f/$PUBLIC_ID")"
+    if [ "$CODE" = "413" ]; then
+        pass "3MB upload via the LB (fpm mode) → nginx 413"
+    else
+        fail "3MB upload via the LB (fpm mode) → nginx 413 (code $CODE)"
+    fi
 else
-    fail "3MB upload direct to :$WEB1_PORT → friendly too-large error (code $CODE)"
+    # Own jar bound to 127.0.0.1: the LB jar's cookies are scoped to "localhost"
+    # and would not be sent to 127.0.0.1:9001 (CSRF would 419).
+    BJAR="$TMP/big-jar.txt"
+    BTOKEN="$(csrf_from "$BJAR" "http://127.0.0.1:$WEB1_PORT/f/$PUBLIC_ID")"
+    CODE="$(curl -s -b "$BJAR" -c "$BJAR" -o "$TMP/neg2.html" -w '%{http_code}' \
+        -F "_token=$BTOKEN" \
+        -F "answers[f_text01]=Big Upload" \
+        -F "files[f_file01]=@$TMP/big.txt;type=text/plain" \
+        "http://127.0.0.1:$WEB1_PORT/f/$PUBLIC_ID")"
+    if [ "$CODE" = "200" ] && grep -q 'File too large (2 MB max).' "$TMP/neg2.html"; then
+        pass "3MB upload direct to :$WEB1_PORT → friendly too-large error"
+    else
+        fail "3MB upload direct to :$WEB1_PORT → friendly too-large error (code $CODE)"
+    fi
 fi
 
 CNT_AFTER="$(mysql_q "SELECT COUNT(*) FROM submissions WHERE form_id=$FORM_ID")"
@@ -505,7 +527,9 @@ fi
 
 ASSUME_YES=1 bash "$ROOT/launch.sh" start --yes >"$TMP/restart.log" 2>&1
 RC=$?
-web1_healthy() { [ "$(curl -s -m 2 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$WEB1_PORT/healthz")" = "200" ]; }
+# Probed through the LB's per-pool route — works for both web runtimes
+# (direct :$WEB1_PORT is FastCGI under fpm and never answers HTTP 200).
+web1_healthy() { [ "$(curl -s -m 2 -o /dev/null -w '%{http_code}' "$LB/__pool/web1/healthz")" = "200" ]; }
 if [ "$RC" = "0" ] && poll 20 web1_healthy; then
     pass "launch.sh start --yes brings web1 back (healthz 200)"
 else

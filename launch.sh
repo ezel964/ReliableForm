@@ -7,6 +7,10 @@
 # MySQL and Redis are system services — launch.sh starts them if needed but
 # `stop` never touches them.
 #
+# Web runtime (WEB_RUNTIME=auto|fpm|cli, env var overrides .env): fpm runs
+# web1/web2 as two independent php-fpm masters on the same ports; cli keeps
+# the php -S dev servers. auto picks fpm when a php-fpm binary is found.
+#
 # bash 3.2 compatible. Errors handled explicitly (no set -e).
 
 set -u
@@ -71,6 +75,93 @@ STATUS_PORT="$(env_get STATUS_PORT 9301)"
 REDIS_HOST="$(env_get REDIS_HOST 127.0.0.1)"
 REDIS_PORT="$(env_get REDIS_PORT 6379)"
 OTEL_ENDPOINT="$(env_get OTEL_EXPORTER_OTLP_ENDPOINT "")"
+
+# Stage 2 runtime knobs. Real env vars override .env (`WEB_RUNTIME=cli bash
+# launch.sh start` must win over the file).
+WEB_RUNTIME_CFG="${WEB_RUNTIME:-}"
+[ -z "$WEB_RUNTIME_CFG" ] && WEB_RUNTIME_CFG="$(env_get WEB_RUNTIME auto)"
+QUEUE_DRIVER_CFG="${QUEUE_DRIVER:-}"
+[ -z "$QUEUE_DRIVER_CFG" ] && QUEUE_DRIVER_CFG="$(env_get QUEUE_DRIVER auto)"
+
+# ---------------------------------------------------------------------------
+# Web runtime resolution (WEB_RUNTIME: auto|fpm|cli)
+# ---------------------------------------------------------------------------
+
+# php-fpm discovery, in contract order. Keep in sync with setup.sh.
+find_php_fpm() {
+    local p=""
+    if have php-fpm; then
+        command -v php-fpm
+        return 0
+    fi
+    if have php; then
+        p="$(dirname "$(command -v php)")/../sbin/php-fpm"
+        if [ -x "$p" ]; then printf '%s\n' "$p"; return 0; fi
+    fi
+    if have brew; then
+        p="$(brew --prefix php 2>/dev/null)/sbin/php-fpm"
+        if [ -x "$p" ]; then printf '%s\n' "$p"; return 0; fi
+    fi
+    # apt ships php-fpm as a separate php8.x-fpm package under /usr/sbin.
+    for p in /usr/sbin/php-fpm8*; do
+        if [ -x "$p" ]; then printf '%s\n' "$p"; return 0; fi
+    done
+    return 1
+}
+
+# Sets WEB_MODE (fpm|cli) and PHP_FPM_BIN. Silent — cmd_start prints the
+# one-line summary. Returns 1 only on a hard config error.
+WEB_MODE=""
+PHP_FPM_BIN=""
+resolve_web_runtime() {
+    case "$WEB_RUNTIME_CFG" in
+        fpm)
+            PHP_FPM_BIN="$(find_php_fpm)" || PHP_FPM_BIN=""
+            if [ -z "$PHP_FPM_BIN" ]; then
+                err "WEB_RUNTIME=fpm but no php-fpm binary found (looked for: php-fpm in PATH, <php>/../sbin, brew prefix, /usr/sbin/php-fpm8*)."
+                err "Install it (brew install php · sudo apt-get install php<X.Y>-fpm) or set WEB_RUNTIME=cli."
+                return 1
+            fi
+            WEB_MODE="fpm"
+            ;;
+        cli)
+            WEB_MODE="cli"
+            ;;
+        auto|"")
+            PHP_FPM_BIN="$(find_php_fpm)" || PHP_FPM_BIN=""
+            if [ -n "$PHP_FPM_BIN" ]; then WEB_MODE="fpm"; else WEB_MODE="cli"; fi
+            ;;
+        *)
+            err "invalid WEB_RUNTIME '$WEB_RUNTIME_CFG' (use auto|fpm|cli)"
+            return 1
+            ;;
+    esac
+    return 0
+}
+
+# Mode the RUNNING stack actually uses: the marker cmd_start writes wins;
+# fall back to resolving the config when the stack was never started.
+effective_web_mode() {
+    local m=""
+    m="$(tr -d '[:space:]' < "$RUN_DIR/web-runtime" 2>/dev/null)"
+    case "$m" in
+        fpm|cli) printf '%s' "$m"; return 0 ;;
+    esac
+    if resolve_web_runtime 2>/dev/null; then
+        printf '%s' "$WEB_MODE"
+    else
+        printf 'cli'
+    fi
+}
+
+# QUEUE_DRIVER is resolved ONCE here and exported to every service started
+# below, so web and workers can never disagree mid-run (auto: gearmand binary
+# present => gearman, else redis). Services never see the literal "auto".
+if [ "$QUEUE_DRIVER_CFG" = "auto" ] || [ -z "$QUEUE_DRIVER_CFG" ]; then
+    if have gearmand; then QUEUE_DRIVER_RESOLVED="gearman"; else QUEUE_DRIVER_RESOLVED="redis"; fi
+else
+    QUEUE_DRIVER_RESOLVED="$QUEUE_DRIVER_CFG"
+fi
 
 # ---------------------------------------------------------------------------
 # PID helpers
@@ -149,20 +240,75 @@ http_code() { # $1 url → echoes 3-digit code (000 when unreachable / no curl)
 }
 
 # ---------------------------------------------------------------------------
-# Nginx conf rendering — plain sed to stdout (NEVER sed -i), per contract.
+# Config rendering — plain sed to stdout (NEVER sed -i), per contract.
 # ---------------------------------------------------------------------------
+# Renders both the runtime-specific web include (fpm: FastCGI to the pools,
+# cli: proxy to php -S) and the shared conf that pulls it in. Requires
+# WEB_MODE to be resolved.
 render_nginx_conf() {
+    local inc_template="$ROOT/config/nginx.web-proxy.inc.template"
+    [ "$WEB_MODE" = "fpm" ] && inc_template="$ROOT/config/nginx.web-fpm.inc.template"
+    sed -e "s|{{ROOT}}|$ROOT|g" \
+        -e "s|{{WEB1_PORT}}|$WEB1_PORT|g" \
+        -e "s|{{WEB2_PORT}}|$WEB2_PORT|g" \
+        "$inc_template" > "$RUN_DIR/nginx-web.inc" || return 1
     sed -e "s|{{ROOT}}|$ROOT|g" \
         -e "s|{{LB_PORT}}|$LB_PORT|g" \
         -e "s|{{WEB1_PORT}}|$WEB1_PORT|g" \
         -e "s|{{WEB2_PORT}}|$WEB2_PORT|g" \
         -e "s|{{STATUS_PORT}}|$STATUS_PORT|g" \
+        -e "s|{{WEB_INC}}|$RUN_DIR/nginx-web.inc|g" \
         "$ROOT/config/nginx.conf.template" > "$NGINX_CONF"
+}
+
+render_fpm_conf() { # $1 pool name, $2 port
+    sed -e "s|{{ROOT}}|$ROOT|g" \
+        -e "s|{{NAME}}|$1|g" \
+        -e "s|{{PORT}}|$2|g" \
+        -e "s|{{QUEUE_DRIVER}}|$QUEUE_DRIVER_RESOLVED|g" \
+        "$ROOT/config/php-fpm.conf.template" > "$RUN_DIR/fpm-$1.conf"
 }
 
 # ---------------------------------------------------------------------------
 # Service starters
 # ---------------------------------------------------------------------------
+
+# Start one php-fpm pool master (fpm mode). The caller already checked
+# is_running, cleared the pid file and swept orphans. Like nginx, the master
+# daemonizes and writes storage/run/<name>.pid itself — the pid never comes
+# from $!.
+start_fpm_pool() { # $1 pool name, $2 port
+    local name="$1" port="$2" pidfile="$RUN_DIR/$1.pid" p="" i=0
+    if ! render_fpm_conf "$name" "$port"; then
+        err "Could not render config/php-fpm.conf.template to storage/run/fpm-$name.conf."
+        return 1
+    fi
+    if ! "$PHP_FPM_BIN" -t -y "$RUN_DIR/fpm-$name.conf" >"$RUN_DIR/fpm-validate.out" 2>&1; then
+        err "Rendered php-fpm config failed validation (php-fpm -t):"
+        sed 's/^/    /' "$RUN_DIR/fpm-validate.out" >&2
+        rm -f "$RUN_DIR/fpm-validate.out"
+        return 1
+    fi
+    rm -f "$RUN_DIR/fpm-validate.out"
+    if ! "$PHP_FPM_BIN" -y "$RUN_DIR/fpm-$name.conf"; then
+        err "$name (php-fpm) failed to start — check storage/logs/$name.log"
+        return 1
+    fi
+    while [ $i -lt 30 ]; do
+        if [ -s "$pidfile" ]; then
+            p="$(tr -d '[:space:]' < "$pidfile" 2>/dev/null)"
+            if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then
+                info "$name starting (php-fpm master pid $p) — log: storage/logs/$name.log"
+                return 0
+            fi
+        fi
+        sleep 0.1
+        i=$((i + 1))
+    done
+    err "$name (php-fpm) did not write a live pid to storage/run/$name.pid within 3s — check storage/logs/$name.log"
+    return 1
+}
+
 start_app_service() { # $1 name
     local name="$1"
     if is_running "$name"; then
@@ -173,11 +319,19 @@ start_app_service() { # $1 name
     sweep_orphans "$name"
     case "$name" in
         web1)
+            if [ "$WEB_MODE" = "fpm" ]; then
+                start_fpm_pool web1 "$WEB1_PORT"
+                return $?
+            fi
             INSTANCE_ID=web1 PORT="$WEB1_PORT" PHP_CLI_SERVER_WORKERS=4 \
                 nohup php -S "127.0.0.1:$WEB1_PORT" -t "$ROOT/apps/web/public" \
                 "$ROOT/apps/web/public/index.php" >> "$LOG_DIR/web1.log" 2>&1 &
             ;;
         web2)
+            if [ "$WEB_MODE" = "fpm" ]; then
+                start_fpm_pool web2 "$WEB2_PORT"
+                return $?
+            fi
             INSTANCE_ID=web2 PORT="$WEB2_PORT" PHP_CLI_SERVER_WORKERS=4 \
                 nohup php -S "127.0.0.1:$WEB2_PORT" -t "$ROOT/apps/web/public" \
                 "$ROOT/apps/web/public/index.php" >> "$LOG_DIR/web2.log" 2>&1 &
@@ -331,6 +485,46 @@ cmd_start() {
     fi
     ok "php + node present"
 
+    # Resolve the web runtime once for this run (binary discovery happens
+    # after the php check so the <php>/../sbin probe can work).
+    if ! resolve_web_runtime; then
+        exit 1
+    fi
+
+    # The runtime is pinned per stack-run: flipping it while part of the web
+    # tier is still up would desync the LB include from the running instances
+    # (FastCGI against an HTTP server, or vice versa). With a partially-running
+    # web tier, auto ADOPTS the running mode (e.g. `start` healing one killed
+    # instance); an EXPLICIT WEB_RUNTIME that differs restarts web1/web2.
+    RUNNING_WEB_MODE=""
+    if is_running web1 || is_running web2; then
+        RUNNING_WEB_MODE="$(tr -d '[:space:]' < "$RUN_DIR/web-runtime" 2>/dev/null)"
+        case "$RUNNING_WEB_MODE" in fpm|cli) ;; *) RUNNING_WEB_MODE="" ;; esac
+    fi
+    if [ -n "$RUNNING_WEB_MODE" ] && [ "$RUNNING_WEB_MODE" != "$WEB_MODE" ]; then
+        # Adopting fpm needs the binary; without it fall through to a restart.
+        if { [ "$WEB_RUNTIME_CFG" = "auto" ] || [ -z "$WEB_RUNTIME_CFG" ]; } \
+            && { [ "$RUNNING_WEB_MODE" = "cli" ] || [ -n "$PHP_FPM_BIN" ]; }; then
+            WEB_MODE="$RUNNING_WEB_MODE"
+            info "web tier already running in $WEB_MODE mode — keeping it (stop + start to re-resolve WEB_RUNTIME=auto)"
+        else
+            warn "web tier is running in $RUNNING_WEB_MODE mode but this run resolved to $WEB_MODE — restarting web1/web2"
+            stop_service web1
+            stop_service web2
+        fi
+    fi
+
+    if [ "$WEB_MODE" = "fpm" ]; then
+        info "web runtime: fpm — $PHP_FPM_BIN (WEB_RUNTIME=$WEB_RUNTIME_CFG)"
+    elif [ "$WEB_RUNTIME_CFG" = "auto" ] && [ -z "$PHP_FPM_BIN" ]; then
+        info "web runtime: cli — php -S (WEB_RUNTIME=auto, no php-fpm binary found)"
+    else
+        info "web runtime: cli — php -S (WEB_RUNTIME=$WEB_RUNTIME_CFG)"
+    fi
+    # Resolved queue driver for every service started below (see top of file).
+    QUEUE_DRIVER="$QUEUE_DRIVER_RESOLVED"
+    export QUEUE_DRIVER
+
     # Redis is required: sessions, queues and heartbeats live there.
     if redis_running; then
         ok "Redis is running ($REDIS_HOST:$REDIS_PORT)"
@@ -415,7 +609,12 @@ cmd_start() {
         exit 1
     fi
     rm -f "$RUN_DIR/nginx-validate.out"
-    ok "nginx config rendered + validated (storage/run/nginx.conf)"
+    ok "nginx config rendered + validated (storage/run/nginx.conf + nginx-web.inc, $WEB_MODE mode)"
+
+    # Record the resolved mode for tooling that probes the running stack
+    # (launch.sh status, tests/e2e.sh) — the config alone can't tell them
+    # what an already-running stack was started with.
+    printf '%s\n' "$WEB_MODE" > "$RUN_DIR/web-runtime"
 
     # --- start everything -------------------------------------------------
     for name in $APP_SERVICES; do
@@ -437,11 +636,22 @@ cmd_start() {
         printf '%s' "$left"
     }
 
-    # The four /healthz targets, exactly per contract.
+    # The four /healthz targets. fpm pools speak FastCGI, not HTTP — they are
+    # probed through the LB's per-pool routes; cli mode keeps direct probes.
     for name in web1 web2 status nginx; do
         case "$name" in
-            web1)  code="$(wait_http_ready "http://127.0.0.1:$WEB1_PORT/healthz" "$(budget_left)")"; detail="http://127.0.0.1:$WEB1_PORT" ;;
-            web2)  code="$(wait_http_ready "http://127.0.0.1:$WEB2_PORT/healthz" "$(budget_left)")"; detail="http://127.0.0.1:$WEB2_PORT" ;;
+            web1)
+                if [ "$WEB_MODE" = "fpm" ]; then
+                    code="$(wait_http_ready "http://127.0.0.1:$LB_PORT/__pool/web1/healthz" "$(budget_left)")"; detail="fpm pool :$WEB1_PORT (via LB /__pool/web1)"
+                else
+                    code="$(wait_http_ready "http://127.0.0.1:$WEB1_PORT/healthz" "$(budget_left)")"; detail="http://127.0.0.1:$WEB1_PORT"
+                fi ;;
+            web2)
+                if [ "$WEB_MODE" = "fpm" ]; then
+                    code="$(wait_http_ready "http://127.0.0.1:$LB_PORT/__pool/web2/healthz" "$(budget_left)")"; detail="fpm pool :$WEB2_PORT (via LB /__pool/web2)"
+                else
+                    code="$(wait_http_ready "http://127.0.0.1:$WEB2_PORT/healthz" "$(budget_left)")"; detail="http://127.0.0.1:$WEB2_PORT"
+                fi ;;
             status) code="$(wait_http_ready "http://127.0.0.1:$STATUS_PORT/healthz" "$(budget_left)")"; detail="http://127.0.0.1:$STATUS_PORT" ;;
             nginx) code="$(wait_http_ready "http://127.0.0.1:$LB_PORT/healthz" "$(budget_left)")"; detail="http://localhost:$LB_PORT (LB)" ;;
         esac
@@ -567,8 +777,10 @@ cmd_stop() {
 # status
 # ---------------------------------------------------------------------------
 cmd_status() {
-    local name="" p="" code="" hb="" detail="" sym=""
+    local name="" p="" code="" hb="" detail="" sym="" mode=""
+    mode="$(effective_web_mode)"
     info "${C_BOLD}ReliableForm — service status${C_RESET}"
+    info "web runtime: $mode"
     echo ""
     printf '  %s %-14s %-10s %s\n' " " "SERVICE" "PID" "DETAIL"
     for name in $ALL_SERVICES; do
@@ -577,8 +789,18 @@ cmd_status() {
             sym="${C_GREEN}✓${C_RESET}"
             detail=""
             case "$name" in
-                web1)   code="$(http_code "http://127.0.0.1:$WEB1_PORT/healthz")";   detail="healthz $code · http://127.0.0.1:$WEB1_PORT" ;;
-                web2)   code="$(http_code "http://127.0.0.1:$WEB2_PORT/healthz")";   detail="healthz $code · http://127.0.0.1:$WEB2_PORT" ;;
+                web1)
+                    if [ "$mode" = "fpm" ]; then
+                        code="$(http_code "http://127.0.0.1:$LB_PORT/__pool/web1/healthz")"; detail="healthz $code · fpm pool :$WEB1_PORT via LB /__pool/web1"
+                    else
+                        code="$(http_code "http://127.0.0.1:$WEB1_PORT/healthz")"; detail="healthz $code · http://127.0.0.1:$WEB1_PORT"
+                    fi ;;
+                web2)
+                    if [ "$mode" = "fpm" ]; then
+                        code="$(http_code "http://127.0.0.1:$LB_PORT/__pool/web2/healthz")"; detail="healthz $code · fpm pool :$WEB2_PORT via LB /__pool/web2"
+                    else
+                        code="$(http_code "http://127.0.0.1:$WEB2_PORT/healthz")"; detail="healthz $code · http://127.0.0.1:$WEB2_PORT"
+                    fi ;;
                 status) code="$(http_code "http://127.0.0.1:$STATUS_PORT/healthz")"; detail="healthz $code · http://127.0.0.1:$STATUS_PORT" ;;
                 nginx)  code="$(http_code "http://127.0.0.1:$LB_PORT/healthz")";     detail="LB healthz $code · http://localhost:$LB_PORT" ;;
                 worker-*|otel)
@@ -636,7 +858,12 @@ cmd_status() {
 cmd_logs() {
     local f1="" f2=""
     case "$LOG_TARGET" in
-        web1|web2|status|worker-*|otel)
+        web1|web2)
+            f1="$LOG_DIR/$LOG_TARGET.log"
+            # fpm masters also keep a slowlog (requests > 2s) next to it.
+            [ -f "$LOG_DIR/$LOG_TARGET-slow.log" ] && f2="$LOG_DIR/$LOG_TARGET-slow.log"
+            ;;
+        status|worker-*|otel)
             f1="$LOG_DIR/$LOG_TARGET.log"
             ;;
         nginx)
