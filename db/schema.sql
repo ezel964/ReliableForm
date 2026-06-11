@@ -20,7 +20,11 @@ CREATE TABLE IF NOT EXISTS forms (
     title VARCHAR(200) NOT NULL,
     description TEXT NULL,
     fields JSON NOT NULL,
+    conditions JSON NULL,
     webhook_url VARCHAR(500) NULL,
+    submission_limit SMALLINT UNSIGNED NULL,
+    thankyou_message VARCHAR(500) NULL,
+    autoresponder_enabled TINYINT(1) NOT NULL DEFAULT 0,
     is_published TINYINT(1) NOT NULL DEFAULT 1,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -83,6 +87,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 CREATE TABLE IF NOT EXISTS emails (
     id INT UNSIGNED NOT NULL AUTO_INCREMENT,
     submission_id INT UNSIGNED NOT NULL,
+    kind ENUM ('notification', 'autoresponder') NOT NULL DEFAULT 'notification',
     to_email VARCHAR(255) NOT NULL,
     status ENUM ('pending', 'sent', 'failed') NOT NULL DEFAULT 'pending',
     file_path VARCHAR(500) NULL,
@@ -90,6 +95,16 @@ CREATE TABLE IF NOT EXISTS emails (
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (id),
-    UNIQUE KEY uq_emails_submission (submission_id),
+    UNIQUE KEY uq_emails_submission_kind (submission_id, kind),
     CONSTRAINT fk_emails_submission FOREIGN KEY (submission_id) REFERENCES submissions (id) ON DELETE CASCADE
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci;
+
+-- Sessions (SESSION_DRIVER=mysql, the default — production keeps sessions
+-- in MySQL; Redis is cache/rate-limit only).
+CREATE TABLE IF NOT EXISTS sessions (
+    sid CHAR(64) NOT NULL,
+    payload MEDIUMTEXT NOT NULL,
+    expires_at TIMESTAMP NOT NULL,
+    PRIMARY KEY (sid),
+    KEY idx_sessions_expires (expires_at)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci;
