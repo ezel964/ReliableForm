@@ -5,7 +5,7 @@ declare(strict_types=1);
 $publicId = (string) $params['public_id'];
 
 $form = load_public_form($publicId);
-if ($form === null || (int) $form['is_published'] !== 1) {
+if ($form === null) {
     not_found('This form is not available.');
 }
 
@@ -13,6 +13,19 @@ if ($form === null || (int) $form['is_published'] !== 1) {
 if (post_str('website') !== '') {
     Metrics::increment('web.submission.honeypot');
     redirect('/f/' . $publicId . '/thanks');
+}
+
+// Unpublished or at its submission limit ⇒ 410 + closed page, before the
+// rate limiter and validation ever run (a closed form does no work for you).
+$closedReason = form_closed_reason($form);
+if ($closedReason !== null) {
+    Metrics::increment('web.submission.closed');
+    render_page('form_closed', [
+        'title' => (string) $form['title'],
+        'form' => $form,
+        'reason' => $closedReason,
+    ], 410);
+    return;
 }
 
 // Advisory per-IP submission rate limit (XFF-keyed; see ARCHITECTURE.md).
@@ -118,6 +131,13 @@ $dataJson = json_encode($check['data'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_
 // Tolerate a cached pre-iteration-2 form row (no webhook_url key) for ≤60s.
 $webhookUrl = trim((string) ($form['webhook_url'] ?? ''));
 
+// Autoresponder: only when enabled AND the first email-type field carries a
+// valid address (autoresponder_recipient returns null otherwise).
+$autoresponderTo = null;
+if ((int) ($form['autoresponder_enabled'] ?? 0) === 1) {
+    $autoresponderTo = autoresponder_recipient($fields, $check['data']);
+}
+
 // ONE transaction: submission + pending pdf_jobs row + pending emails row.
 // Workers only ever UPDATE these rows — creating them here is the contract.
 $pdo = DB::pdo();
@@ -134,9 +154,15 @@ try {
     );
     DB::run("INSERT INTO pdf_jobs (submission_id, status) VALUES (?, 'pending')", [$submissionId]);
     DB::run(
-        "INSERT INTO emails (submission_id, to_email, status) VALUES (?, ?, 'pending')",
+        "INSERT INTO emails (submission_id, kind, to_email, status) VALUES (?, 'notification', ?, 'pending')",
         [$submissionId, (string) $form['owner_email']]
     );
+    if ($autoresponderTo !== null) {
+        DB::run(
+            "INSERT INTO emails (submission_id, kind, to_email, status) VALUES (?, 'autoresponder', ?, 'pending')",
+            [$submissionId, $autoresponderTo]
+        );
+    }
     if ($webhookUrl !== '') {
         DB::run(
             "INSERT INTO webhook_deliveries (submission_id, url, status) VALUES (?, ?, 'pending')",
@@ -169,6 +195,12 @@ try {
     Queue::push(Queue::QUEUE_EMAIL, [
         'type' => 'email', 'submission_id' => $submissionId, 'attempt' => 0, 'enqueued_at' => $enqueuedAt,
     ]);
+    if ($autoresponderTo !== null) {
+        Queue::push(Queue::QUEUE_EMAIL, [
+            'type' => 'email', 'submission_id' => $submissionId, 'attempt' => 0, 'enqueued_at' => $enqueuedAt,
+            'kind' => 'autoresponder',
+        ]);
+    }
     if ($webhookUrl !== '') {
         Queue::push(Queue::QUEUE_WEBHOOK, [
             'type' => 'webhook', 'submission_id' => $submissionId, 'attempt' => 0, 'enqueued_at' => $enqueuedAt,

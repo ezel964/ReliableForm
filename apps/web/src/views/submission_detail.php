@@ -8,6 +8,7 @@ declare(strict_types=1);
  * @var array<string,mixed> $data
  * @var array<string,mixed>|null $pdfJob
  * @var array<string,mixed>|null $emailRow
+ * @var array<string,mixed>|null $autoresponderRow
  */
 $pdfStatus = (string) ($pdfJob['status'] ?? 'pending');
 $emailStatus = (string) ($emailRow['status'] ?? 'pending');
@@ -118,6 +119,16 @@ foreach ($fields as $f) {
       </div>
       <?php if ($emailStatus === 'failed' && !empty($emailRow['error'])): ?>
         <p class="error-note"><?= e((string) $emailRow['error']) ?></p>
+      <?php endif; ?>
+      <?php if ($autoresponderRow !== null): ?>
+        <div class="job-row">
+          <span class="job-name">Autoresponder</span>
+          <?= status_badge((string) ($autoresponderRow['status'] ?? 'pending')) ?>
+          <span class="muted small">to <?= e((string) $autoresponderRow['to_email']) ?></span>
+        </div>
+        <?php if (($autoresponderRow['status'] ?? '') === 'failed' && !empty($autoresponderRow['error'])): ?>
+          <p class="error-note"><?= e((string) $autoresponderRow['error']) ?></p>
+        <?php endif; ?>
       <?php endif; ?>
     </div>
 

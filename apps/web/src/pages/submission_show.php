@@ -24,8 +24,13 @@ $pdfJob = DB::one(
     'SELECT status, file_path, error, attempts, updated_at FROM pdf_jobs WHERE submission_id = ?',
     [$submissionId]
 );
+// One row per kind since the autoresponder landed — pick each explicitly.
 $emailRow = DB::one(
-    'SELECT status, to_email, error, updated_at FROM emails WHERE submission_id = ?',
+    "SELECT status, to_email, error, updated_at FROM emails WHERE submission_id = ? AND kind = 'notification'",
+    [$submissionId]
+);
+$autoresponderRow = DB::one(
+    "SELECT status, to_email, error, updated_at FROM emails WHERE submission_id = ? AND kind = 'autoresponder'",
     [$submissionId]
 );
 
@@ -37,4 +42,5 @@ render_page('submission_detail', [
     'data' => is_array($data) ? $data : [],
     'pdfJob' => $pdfJob,
     'emailRow' => $emailRow,
+    'autoresponderRow' => $autoresponderRow,
 ]);

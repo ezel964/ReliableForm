@@ -24,9 +24,16 @@ $forms = DB::all(
     [(int) $user['id']]
 );
 
+// Per-form view counters live only in Redis; null ⇒ down ⇒ '—' in the view.
+$viewCounts = form_view_counts(array_map(
+    static fn (array $f): string => (string) $f['public_id'],
+    $forms
+));
+
 render_page('dashboard', [
     'title' => 'Dashboard',
     'currentUser' => $user,
     'forms' => $forms,
+    'viewCounts' => $viewCounts,
     'apiKey' => $apiKey,
 ]);

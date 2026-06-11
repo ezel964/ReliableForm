@@ -79,6 +79,13 @@ if ($fieldErrors !== []) {
 $dataJson = json_encode($check['data'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 $webhookUrl = trim((string) ($form['webhook_url'] ?? ''));
 
+// Autoresponder — identical to the web submit path: only when enabled AND
+// the first email-type field carries a valid address.
+$autoresponderTo = null;
+if ((int) ($form['autoresponder_enabled'] ?? 0) === 1) {
+    $autoresponderTo = autoresponder_recipient($fields, $check['data']);
+}
+
 // ONE transaction: submission + pending pdf_jobs row + pending emails row
 // (+ pending webhook_deliveries row when a webhook is configured). Workers
 // only ever UPDATE these rows — creating them here is the contract. The form
@@ -97,9 +104,15 @@ try {
     );
     DB::run("INSERT INTO pdf_jobs (submission_id, status) VALUES (?, 'pending')", [$submissionId]);
     DB::run(
-        "INSERT INTO emails (submission_id, to_email, status) VALUES (?, ?, 'pending')",
+        "INSERT INTO emails (submission_id, kind, to_email, status) VALUES (?, 'notification', ?, 'pending')",
         [$submissionId, $apiUser['email']]
     );
+    if ($autoresponderTo !== null) {
+        DB::run(
+            "INSERT INTO emails (submission_id, kind, to_email, status) VALUES (?, 'autoresponder', ?, 'pending')",
+            [$submissionId, $autoresponderTo]
+        );
+    }
     if ($webhookUrl !== '') {
         DB::run(
             "INSERT INTO webhook_deliveries (submission_id, url, status) VALUES (?, ?, 'pending')",
@@ -132,6 +145,12 @@ try {
     Queue::push(Queue::QUEUE_EMAIL, [
         'type' => 'email', 'submission_id' => $submissionId, 'attempt' => 0, 'enqueued_at' => $enqueuedAt,
     ]);
+    if ($autoresponderTo !== null) {
+        Queue::push(Queue::QUEUE_EMAIL, [
+            'type' => 'email', 'submission_id' => $submissionId, 'attempt' => 0, 'enqueued_at' => $enqueuedAt,
+            'kind' => 'autoresponder',
+        ]);
+    }
     if ($webhookUrl !== '') {
         Queue::push(Queue::QUEUE_WEBHOOK, [
             'type' => 'webhook', 'submission_id' => $submissionId, 'attempt' => 0, 'enqueued_at' => $enqueuedAt,

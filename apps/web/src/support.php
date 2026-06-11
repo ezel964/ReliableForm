@@ -91,6 +91,7 @@ function load_public_form(string $publicId): ?array
 
     $row = DB::one(
         'SELECT f.id, f.user_id, f.public_id, f.title, f.description, f.fields, f.webhook_url, f.is_published,
+                f.submission_limit, f.thankyou_message, f.autoresponder_enabled,
                 u.email AS owner_email
            FROM forms f
            JOIN users u ON u.id = f.user_id
@@ -125,6 +126,110 @@ function invalidate_form_cache(string $publicId): void
             $e->getMessage()
         ));
     }
+}
+
+/**
+ * Why a public form refuses input: 'unpublished' | 'limit' | null (open).
+ * Cached rows may predate the settings columns (≤60s window) — missing keys
+ * default to "open". The COUNT is advisory under concurrent submits; a
+ * couple of extras past the limit is acceptable for this playground.
+ *
+ * @param array<string, mixed> $form
+ */
+function form_closed_reason(array $form): ?string
+{
+    if ((int) ($form['is_published'] ?? 1) !== 1) {
+        return 'unpublished';
+    }
+    $limit = $form['submission_limit'] ?? null;
+    if ($limit !== null && (int) $limit > 0) {
+        $row = DB::one('SELECT COUNT(*) AS c FROM submissions WHERE form_id = ?', [(int) $form['id']]);
+        if ((int) ($row['c'] ?? 0) >= (int) $limit) {
+            return 'limit';
+        }
+    }
+    return null;
+}
+
+/** Best-effort view counter: INCR stats:views:<public_id> (no TTL) — Redis trouble never breaks the page. */
+function record_form_view(string $publicId): void
+{
+    try {
+        RedisClient::instance()->incr('stats:views:' . $publicId);
+    } catch (Throwable) {
+        // counters just freeze during a Redis outage
+    }
+    Metrics::increment('web.form.view');
+}
+
+/**
+ * View counts for a set of forms (one MGET round trip), keyed by public_id.
+ * Returns null when Redis is unreachable — callers render '—' then.
+ *
+ * @param list<string> $publicIds
+ * @return array<string, int>|null
+ */
+function form_view_counts(array $publicIds): ?array
+{
+    if ($publicIds === []) {
+        return [];
+    }
+    try {
+        $keys = array_map(static fn (string $pid): string => 'stats:views:' . $pid, $publicIds);
+        $values = RedisClient::instance()->command('MGET', ...$keys);
+        if (!is_array($values)) {
+            return null;
+        }
+        $counts = [];
+        foreach (array_values($publicIds) as $i => $pid) {
+            $counts[$pid] = isset($values[$i]) && is_string($values[$i]) ? (int) $values[$i] : 0;
+        }
+        return $counts;
+    } catch (Throwable) {
+        return null;
+    }
+}
+
+/** Conversion as "12.5%" (1dp); '—' when views are 0 or unknown (Redis down). */
+function conversion_label(int $submissions, ?int $views): string
+{
+    if ($views === null || $views <= 0) {
+        return '—';
+    }
+    return round($submissions / $views * 100, 1) . '%';
+}
+
+/**
+ * Short inbox preview: the first $max non-empty answers in field order,
+ * each truncated. Plain text — the view e()'s it like any other cell.
+ *
+ * @param list<array<string, mixed>> $fields
+ * @param array<string, mixed> $data decoded submissions.data
+ */
+function submission_preview(array $fields, array $data, int $max = 2): string
+{
+    $parts = [];
+    foreach ($fields as $field) {
+        if (!is_array($field)) {
+            continue;
+        }
+        $value = $data[(string) ($field['id'] ?? '')] ?? null;
+        if (is_array($value)) { // checkbox submits string[]
+            $value = implode(', ', array_map(static fn ($v): string => is_scalar($v) ? (string) $v : '?', $value));
+        }
+        if (!is_string($value) || trim($value) === '') {
+            continue;
+        }
+        $value = trim($value);
+        if (mb_strlen($value) > 48) {
+            $value = mb_substr($value, 0, 48) . '…';
+        }
+        $parts[] = $value;
+        if (count($parts) >= $max) {
+            break;
+        }
+    }
+    return implode(' · ', $parts);
 }
 
 /** Absolute public URL for a form. */

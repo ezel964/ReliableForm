@@ -128,13 +128,64 @@ function eml_build(array $row, string $toEmail): string
 }
 
 /**
+ * Compose the autoresponder: addressed to the submitter, thanking them and
+ * echoing their own answers. The notification message is eml_build() above —
+ * its output stays byte-for-byte what it always was.
+ *
+ * @param array<string, mixed> $row submission joined with its form
+ */
+function eml_build_autoresponder(array $row, string $toEmail): string
+{
+    $fields = json_decode((string) $row['fields'], true);
+    if (!is_array($fields)) {
+        throw new RuntimeException('form fields JSON is invalid');
+    }
+    $data = json_decode((string) $row['data'], true);
+    if (!is_array($data)) {
+        $data = [];
+    }
+
+    $title = (string) $row['title'];
+    $submissionId = (int) $row['id'];
+
+    $headers = [
+        'From: ReliableForm <noreply@reliableform.dev>',
+        'To: ' . $toEmail,
+        'Subject: Thanks for your submission — "' . $title . '"',
+        'Date: ' . gmdate(DATE_RFC2822),
+        'MIME-Version: 1.0',
+        'Content-Type: text/plain; charset=utf-8',
+        'X-ReliableForm-Submission: ' . $submissionId,
+    ];
+
+    $lines = [
+        'Hi,',
+        '',
+        sprintf('Thanks for your submission to "%s" — here is a copy of your answers:', $title),
+        '',
+    ];
+    foreach ($fields as $field) {
+        if (!is_array($field)) {
+            continue;
+        }
+        $lines[] = (string) ($field['label'] ?? '') . ': ' . resolve_answer($field, $data);
+    }
+    $lines[] = '';
+    $lines[] = '-- ';
+    $lines[] = 'ReliableForm';
+
+    return implode("\r\n", $headers) . "\r\n\r\n" . implode("\r\n", $lines) . "\r\n";
+}
+
+/**
  * @param array<string, mixed> $job
  * @return string outcome for the job span/log ('retried'|'dead')
  */
-function email_handle_failure(array $job, int $submissionId, Throwable $e): string
+function email_handle_failure(array $job, int $submissionId, string $kind, Throwable $e): string
 {
     worker_log(sprintf(
-        'email job for submission %d failed: %s: %s',
+        'email job (%s) for submission %d failed: %s: %s',
+        $kind,
         $submissionId,
         get_class($e),
         $e->getMessage()
@@ -156,8 +207,8 @@ function email_handle_failure(array $job, int $submissionId, Throwable $e): stri
         }
         try {
             DB::run(
-                "UPDATE emails SET status = 'failed', error = ? WHERE submission_id = ?",
-                [substr($e->getMessage(), 0, 500), $submissionId]
+                "UPDATE emails SET status = 'failed', error = ? WHERE submission_id = ? AND kind = ?",
+                [substr($e->getMessage(), 0, 500), $submissionId, $kind]
             );
         } catch (Throwable $dbErr) {
             // a failure updating the row must not crash the loop
@@ -189,14 +240,21 @@ function email_handle_job(array $job): string
     }
     $submissionId = (int) $submissionId;
 
+    // Producers older than the autoresponder feature send no kind ⇒ notification.
+    $kind = $job['kind'] ?? 'notification';
+    if (!in_array($kind, ['notification', 'autoresponder'], true)) {
+        return email_dead_letter($job, 'invalid job shape: unknown kind ' . json_encode($kind));
+    }
+
     try {
         // The web app owns the row (to_email pre-set); workers never INSERT it.
+        // One row per (submission, kind) — UNIQUE(submission_id, kind).
         $emailRow = DB::one(
-            'SELECT to_email, status FROM emails WHERE submission_id = ?',
-            [$submissionId]
+            'SELECT to_email, status FROM emails WHERE submission_id = ? AND kind = ?',
+            [$submissionId, $kind]
         );
         if ($emailRow === null) {
-            return email_dead_letter($job, 'emails row missing for submission ' . $submissionId);
+            return email_dead_letter($job, $kind . ' emails row missing for submission ' . $submissionId);
         }
         if ($emailRow['status'] === 'sent') {
             return 'done'; // idempotent: re-delivered job is a no-op
@@ -213,19 +271,25 @@ function email_handle_job(array $job): string
             return email_dead_letter($job, 'submission ' . $submissionId . ' not found');
         }
 
-        $relPath = 'storage/mail/submission-' . $submissionId . '.eml';
-        atomic_write(RF_ROOT . '/' . $relPath, eml_build($row, (string) $emailRow['to_email']));
+        if ($kind === 'autoresponder') {
+            $relPath = 'storage/mail/submission-' . $submissionId . '-autoresponder.eml';
+            $eml = eml_build_autoresponder($row, (string) $emailRow['to_email']);
+        } else {
+            $relPath = 'storage/mail/submission-' . $submissionId . '.eml';
+            $eml = eml_build($row, (string) $emailRow['to_email']);
+        }
+        atomic_write(RF_ROOT . '/' . $relPath, $eml);
 
         DB::run(
-            "UPDATE emails SET status = 'sent', file_path = ?, error = NULL WHERE submission_id = ?",
-            [$relPath, $submissionId]
+            "UPDATE emails SET status = 'sent', file_path = ?, error = NULL WHERE submission_id = ? AND kind = ?",
+            [$relPath, $submissionId, $kind]
         );
 
         Metrics::increment('worker.email.sent');
         Metrics::timing('worker.email.job_ms', (microtime(true) - $start) * 1000);
         return 'done';
     } catch (Throwable $e) {
-        return email_handle_failure($job, $submissionId, $e);
+        return email_handle_failure($job, $submissionId, $kind, $e);
     }
 }
 

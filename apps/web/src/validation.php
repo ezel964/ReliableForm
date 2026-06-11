@@ -167,6 +167,82 @@ function validate_builder_request(array $post): array
     ];
 }
 
+/**
+ * Validate the form-settings POST (publish toggle, submission limit,
+ * thank-you message, autoresponder toggle). Rejects on any violation —
+ * never silently "fixes" the payload, same stance as the builder validator.
+ *
+ * @param array<string, mixed> $post
+ * @return array{ok: bool, error: ?string, is_published: int, submission_limit: ?int, thankyou_message: ?string, autoresponder_enabled: int}
+ */
+function validate_settings_request(array $post): array
+{
+    $fail = static fn (string $error): array => [
+        'ok' => false, 'error' => $error, 'is_published' => 0, 'submission_limit' => null,
+        'thankyou_message' => null, 'autoresponder_enabled' => 0,
+    ];
+
+    // Checkboxes: absent ⇒ off (that's how browsers submit unchecked boxes).
+    $isPublished = !empty($post['is_published']) ? 1 : 0;
+    $autoresponderEnabled = !empty($post['autoresponder_enabled']) ? 1 : 0;
+
+    $limitRaw = $post['submission_limit'] ?? '';
+    if (!is_string($limitRaw)) {
+        return $fail('Submission limit is invalid.');
+    }
+    $limitRaw = trim($limitRaw);
+    $limit = null;
+    if ($limitRaw !== '') {
+        // Whole digits only (no sign, no decimals); column is SMALLINT UNSIGNED.
+        if (!ctype_digit($limitRaw) || (int) $limitRaw < 1 || (int) $limitRaw > 65535) {
+            return $fail('Submission limit must be a whole number from 1 to 65535 — or empty for unlimited.');
+        }
+        $limit = (int) $limitRaw;
+    }
+
+    $messageRaw = $post['thankyou_message'] ?? '';
+    if (!is_string($messageRaw)) {
+        return $fail('Thank-you message is invalid.');
+    }
+    $message = trim($messageRaw);
+    if (mb_strlen($message) > 500) {
+        return $fail('Thank-you message is too long (500 characters max).');
+    }
+
+    return [
+        'ok' => true,
+        'error' => null,
+        'is_published' => $isPublished,
+        'submission_limit' => $limit,
+        'thankyou_message' => $message === '' ? null : $message,
+        'autoresponder_enabled' => $autoresponderEnabled,
+    ];
+}
+
+/**
+ * Recipient for the autoresponder email: the submitted answer to the form's
+ * FIRST email-type field. The first such field decides alone — when its
+ * answer is missing, empty or not a valid address there is NO autoresponder
+ * (a later email field never substitutes).
+ *
+ * @param list<array<string, mixed>> $fields the form's field definitions
+ * @param array<string, mixed> $data normalized submission data
+ */
+function autoresponder_recipient(array $fields, array $data): ?string
+{
+    foreach ($fields as $field) {
+        if (!is_array($field) || ($field['type'] ?? '') !== 'email') {
+            continue;
+        }
+        $value = $data[(string) ($field['id'] ?? '')] ?? '';
+        if (is_string($value) && $value !== '' && filter_var($value, FILTER_VALIDATE_EMAIL) !== false) {
+            return $value;
+        }
+        return null;
+    }
+    return null;
+}
+
 /** Best-effort decode of a (possibly invalid) fields_json for redisplaying the builder. */
 function decode_fields_for_redisplay(string $raw): array
 {

@@ -143,6 +143,10 @@ if ($path === '/' && $method === 'GET') {
     $page = 'form_submissions';
     $params['id'] = $m[1];
     $routePattern = '/forms/{id}/submissions';
+} elseif (in_array($method, ['GET', 'POST'], true) && preg_match('#^/forms/(\d+)/settings$#', $path, $m) === 1) {
+    $page = 'form_settings';
+    $params['id'] = $m[1];
+    $routePattern = '/forms/{id}/settings';
 } elseif ($method === 'GET' && preg_match('#^/forms/(\d+)/export\.csv$#', $path, $m) === 1) {
     $page = 'export_csv';
     $params['id'] = $m[1];

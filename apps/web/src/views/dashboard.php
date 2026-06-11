@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 /**
  * @var list<array<string,mixed>> $forms
+ * @var array<string,int>|null $viewCounts keyed by public_id; null ⇒ Redis down
  * @var string $apiKey
  */
 $apiBase = rtrim((string) Config::get('APP_URL', 'http://localhost:8080'), '/');
@@ -27,13 +28,18 @@ $curlExample = 'curl -H "Authorization: Bearer ' . $apiKey . '" ' . $apiBase . '
         <tr>
           <th>Form</th>
           <th>Submissions</th>
+          <th>Views</th>
+          <th>Conversion</th>
           <th>Public link</th>
           <th class="th-actions">Actions</th>
         </tr>
       </thead>
       <tbody>
         <?php foreach ($forms as $form): ?>
-          <?php $url = public_form_url((string) $form['public_id']); ?>
+          <?php
+          $url = public_form_url((string) $form['public_id']);
+          $views = $viewCounts === null ? null : (int) ($viewCounts[(string) $form['public_id']] ?? 0);
+          ?>
           <tr>
             <td>
               <strong><?= e((string) $form['title']) ?></strong>
@@ -44,12 +50,15 @@ $curlExample = 'curl -H "Authorization: Bearer ' . $apiKey . '" ' . $apiBase . '
                 <?= (int) $form['submission_count'] ?> submission<?= (int) $form['submission_count'] === 1 ? '' : 's' ?>
               </a>
             </td>
+            <td><?= $views === null ? '—' : $views ?></td>
+            <td><?= e(conversion_label((int) $form['submission_count'], $views)) ?></td>
             <td class="cell-link">
               <a href="<?= e($url) ?>" target="_blank" rel="noopener">/f/<?= e((string) $form['public_id']) ?></a>
               <button type="button" class="btn btn-ghost btn-small" data-copy="<?= e($url) ?>">Copy</button>
             </td>
             <td class="cell-actions">
               <a class="btn btn-ghost btn-small" href="/forms/<?= (int) $form['id'] ?>/edit">Edit</a>
+              <a class="btn btn-ghost btn-small" href="/forms/<?= (int) $form['id'] ?>/settings">Settings</a>
               <form method="post" action="/forms/<?= (int) $form['id'] ?>/delete" class="inline-form"
                     data-confirm="Delete &quot;<?= e((string) $form['title']) ?>&quot; and all of its submissions?">
                 <?= Csrf::field() ?>
