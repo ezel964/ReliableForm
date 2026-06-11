@@ -6,6 +6,8 @@ declare(strict_types=1);
  * @var array<string,mixed> $form
  * @var array{is_published: int, submission_limit: string, thankyou_message: string, autoresponder_enabled: int} $values
  */
+$embedSnippet = '<iframe src="' . public_form_url((string) $form['public_id'])
+    . '/embed" width="100%" height="600" style="border:none;"></iframe>';
 ?>
 <div class="page-head">
   <div>
@@ -56,4 +58,13 @@ declare(strict_types=1);
 
     <button type="submit" class="btn btn-primary">Save settings</button>
   </form>
+</div>
+
+<div class="card">
+  <h2>Embed</h2>
+  <p class="hint">Paste this snippet into any page — the form renders chrome-less inside an iframe.</p>
+  <div class="form-row">
+    <textarea class="input" rows="2" readonly><?= e($embedSnippet) ?></textarea>
+  </div>
+  <button type="button" class="btn btn-ghost btn-small" data-copy="<?= e($embedSnippet) ?>">Copy snippet</button>
 </div>

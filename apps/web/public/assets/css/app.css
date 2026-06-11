@@ -277,6 +277,12 @@ textarea.input { resize: vertical; }
 .public-form { max-width: 680px; margin: 12px auto; padding: 32px; }
 .form-description { color: var(--muted); margin-bottom: 22px; }
 
+/* embed variant (/f/{id}/embed) — chrome-less, iframe-friendly */
+body.embed-page { background: #fff; }
+body.embed-page .main { padding-top: 8px; padding-bottom: 8px; }
+body.embed-page .public-form,
+body.embed-page .center-card { max-width: none; margin: 0; box-shadow: none; }
+
 /* ---------- star rating (accessible radio group) ----------
    DOM order is max..1 with row-reverse so checked ~ label fills the
    visually-preceding stars. */
@@ -464,6 +470,19 @@ textarea.input { resize: vertical; }
   border-radius: 7px;
   width: 100%;
 }
+
+/* builder logic rules (IF … THEN … rows) */
+.logic-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 10px; }
+.logic-row select,
+.logic-row input {
+  padding: 8px 10px;
+  font-size: 14px;
+  font-family: inherit;
+  border: 1px solid #d1d5db;
+  border-radius: 7px;
+}
+.logic-row input { flex: 1; min-width: 120px; }
+.logic-kw { font-size: 12px; font-weight: 700; color: var(--muted); }
 
 .bf-preview {
   margin-top: 14px;

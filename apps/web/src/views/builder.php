@@ -13,8 +13,10 @@ declare(strict_types=1);
  * @var string $descriptionValue
  * @var string $webhookValue
  * @var array $fields
+ * @var array $conditions logic rules, serialized into hidden conditions_json
  */
 $webhookValue = $webhookValue ?? '';
+$conditions = $conditions ?? [];
 ?>
 <div class="page-head">
   <h1><?= $mode === 'edit' ? 'Edit form' : 'New form' ?></h1>
@@ -30,6 +32,7 @@ $webhookValue = $webhookValue ?? '';
 <form method="post" action="<?= e($action) ?>" id="builder-form">
   <?= Csrf::field() ?>
   <input type="hidden" name="fields_json" id="fields_json" value="">
+  <input type="hidden" name="conditions_json" id="conditions_json" value="">
 
   <div class="card builder-head">
     <div class="form-row">
@@ -61,9 +64,20 @@ $webhookValue = $webhookValue ?? '';
     </aside>
     <div class="field-list" id="field-list"></div>
   </div>
+
+  <div class="card" id="logic-card">
+    <h2>Logic</h2>
+    <p class="hint">Show or hide a field depending on another field's answer · 20 rules max.</p>
+    <div id="logic-rules"></div>
+    <button type="button" class="btn btn-ghost btn-small" id="logic-add">+ Add rule</button>
+  </div>
 </form>
 
 <script type="application/json" id="builder-initial"><?= json_encode(
     $fields,
+    JSON_HEX_TAG | JSON_HEX_AMP | JSON_UNESCAPED_UNICODE
+) ?: '[]' ?></script>
+<script type="application/json" id="builder-conditions-initial"><?= json_encode(
+    $conditions,
     JSON_HEX_TAG | JSON_HEX_AMP | JSON_UNESCAPED_UNICODE
 ) ?: '[]' ?></script>

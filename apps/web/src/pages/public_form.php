@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 $publicId = (string) $params['public_id'];
+$embed = ($params['embed'] ?? '') === '1';
 
 $form = load_public_form($publicId);
 if ($form === null) {
@@ -16,6 +17,7 @@ if ($closedReason !== null) {
         'title' => (string) $form['title'],
         'form' => $form,
         'reason' => $closedReason,
+        'embed' => $embed,
     ]);
     return;
 }
@@ -24,12 +26,15 @@ if ($closedReason !== null) {
 record_form_view($publicId);
 
 $fields = json_decode((string) $form['fields'], true);
+$conditions = json_decode((string) ($form['conditions'] ?? ''), true);
 
 render_page('public_form', [
     'title' => (string) $form['title'],
     'form' => $form,
     'fields' => is_array($fields) ? $fields : [],
+    'conditions' => is_array($conditions) ? $conditions : [],
     'errors' => [],
     'old' => [],
     'publicId' => $publicId,
+    'embed' => $embed,
 ]);

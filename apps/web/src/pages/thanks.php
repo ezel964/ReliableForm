@@ -18,4 +18,6 @@ render_page('thanks', [
     'form' => $form,
     'publicId' => $publicId,
     'thankyouMessage' => $thankyouMessage,
+    // ?embed=1: the submit POST inside an iframe redirects here — stay chrome-less.
+    'embed' => ($_GET['embed'] ?? '') === '1',
 ]);

@@ -10,7 +10,10 @@
   var listEl = document.getElementById('field-list');
   var paletteEl = document.getElementById('palette-buttons');
   var hiddenEl = document.getElementById('fields_json');
-  if (!form || !listEl || !paletteEl || !hiddenEl) {
+  var logicListEl = document.getElementById('logic-rules');
+  var logicAddBtn = document.getElementById('logic-add');
+  var conditionsEl = document.getElementById('conditions_json');
+  if (!form || !listEl || !paletteEl || !hiddenEl || !logicListEl || !logicAddBtn || !conditionsEl) {
     return;
   }
 
@@ -32,10 +35,32 @@
   var OPTION_TYPES = ['select', 'radio', 'checkbox'];
   var PLACEHOLDER_TYPES = ['text', 'textarea', 'email', 'number'];
 
+  /* Logic rules (forms.conditions): {"if":{field,op,value},"then":{action,target}} */
+  var OPS = [
+    { op: 'equals', name: 'is' },
+    { op: 'not_equals', name: 'is not' },
+    { op: 'contains', name: 'contains' }
+  ];
+  var ACTIONS = ['show', 'hide'];
+  var MAX_RULES = 20;
+
   var state = loadInitial();
+  var rules = loadInitialRules();
 
   buildPalette();
   renderList();
+
+  logicAddBtn.addEventListener('click', function () {
+    if (rules.length >= MAX_RULES || state.length < 2) {
+      return;
+    }
+    // target defaults to a different field — self-reference is rejected server-side
+    rules.push({
+      'if': { field: state[0].id, op: 'equals', value: '' },
+      'then': { action: 'show', target: state[1].id }
+    });
+    renderLogic();
+  });
 
   form.addEventListener('submit', function (ev) {
     if (state.length === 0) {
@@ -44,6 +69,7 @@
       return;
     }
     hiddenEl.value = JSON.stringify(state);
+    conditionsEl.value = JSON.stringify(rules);
   });
 
   /* ---------- state ---------- */
@@ -97,6 +123,48 @@
       field.max = (max >= 1 && max <= 10) ? max : 5;
     }
     return field;
+  }
+
+  // Coerce loaded rules into well-formed ones (edit mode / redisplay); rules
+  // referencing fields that no longer exist are pruned in renderLogic().
+  function loadInitialRules() {
+    var el2 = document.getElementById('builder-conditions-initial');
+    if (!el2) {
+      return [];
+    }
+    var parsed;
+    try {
+      parsed = JSON.parse(el2.textContent || '[]');
+    } catch (e) {
+      return [];
+    }
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    var out = [];
+    parsed.forEach(function (raw) {
+      if (out.length >= MAX_RULES || !raw || typeof raw !== 'object'
+          || !raw['if'] || typeof raw['if'] !== 'object'
+          || !raw['then'] || typeof raw['then'] !== 'object') {
+        return;
+      }
+      var op = raw['if'].op;
+      if (!OPS.some(function (o) { return o.op === op; })) {
+        op = 'equals';
+      }
+      out.push({
+        'if': {
+          field: typeof raw['if'].field === 'string' ? raw['if'].field : '',
+          op: op,
+          value: typeof raw['if'].value === 'string' ? raw['if'].value.slice(0, 200) : ''
+        },
+        'then': {
+          action: raw['then'].action === 'hide' ? 'hide' : 'show',
+          target: typeof raw['then'].target === 'string' ? raw['then'].target : ''
+        }
+      });
+    });
+    return out;
   }
 
   function genId(pool) {
@@ -167,11 +235,123 @@
         'class': 'bf-empty',
         text: 'No fields yet — add one from the palette.'
       }));
+      renderLogic();
       return;
     }
     state.forEach(function (field, idx) {
       listEl.appendChild(buildCard(field, idx));
     });
+    renderLogic(); // field add/remove/reorder changes the rule selects too
+  }
+
+  /* ---------- logic rules ---------- */
+
+  function hasField(id) {
+    return state.some(function (f) { return f.id === id; });
+  }
+
+  function renderLogic() {
+    // a removed field silently takes its rules with it (same as options)
+    rules = rules.filter(function (r) {
+      return hasField(r['if'].field) && hasField(r['then'].target);
+    });
+    while (logicListEl.firstChild) {
+      logicListEl.removeChild(logicListEl.firstChild);
+    }
+    if (state.length < 2) {
+      rules = [];
+      logicListEl.appendChild(el('div', {
+        'class': 'bf-empty',
+        text: 'Logic needs at least two fields — one to watch, one to show or hide.'
+      }));
+      logicAddBtn.disabled = true;
+      return;
+    }
+    if (rules.length === 0) {
+      logicListEl.appendChild(el('div', { 'class': 'bf-empty', text: 'No rules yet.' }));
+    }
+    rules.forEach(function (rule, idx) {
+      logicListEl.appendChild(buildRuleRow(rule, idx));
+    });
+    logicAddBtn.disabled = rules.length >= MAX_RULES;
+  }
+
+  function buildRuleRow(rule, idx) {
+    var fieldSel = fieldSelect(rule['if'].field, function (id) { rule['if'].field = id; });
+
+    var opSel = el('select', {});
+    OPS.forEach(function (o) {
+      var opt = el('option', { value: o.op, text: o.name });
+      if (rule['if'].op === o.op) {
+        opt.selected = true;
+      }
+      opSel.appendChild(opt);
+    });
+    opSel.addEventListener('change', function () { rule['if'].op = opSel.value; });
+
+    var valueInput = el('input', {
+      type: 'text', maxlength: '200', value: rule['if'].value, placeholder: 'value'
+    });
+    valueInput.addEventListener('input', function () { rule['if'].value = valueInput.value; });
+
+    var actionSel = el('select', {});
+    ACTIONS.forEach(function (a) {
+      var opt = el('option', { value: a, text: a });
+      if (rule['then'].action === a) {
+        opt.selected = true;
+      }
+      actionSel.appendChild(opt);
+    });
+    actionSel.addEventListener('change', function () { rule['then'].action = actionSel.value; });
+
+    var targetSel = fieldSelect(rule['then'].target, function (id) { rule['then'].target = id; });
+
+    var rm = iconBtn('✕', 'Remove rule');
+    rm.addEventListener('click', function () {
+      rules.splice(idx, 1);
+      renderLogic();
+    });
+
+    return el('div', { 'class': 'logic-row' }, [
+      el('span', { 'class': 'logic-kw', text: 'IF' }),
+      fieldSel, opSel, valueInput,
+      el('span', { 'class': 'logic-kw', text: 'THEN' }),
+      actionSel, targetSel, rm
+    ]);
+  }
+
+  function fieldSelect(selectedId, onChange) {
+    var sel = el('select', { 'class': 'logic-field' });
+    state.forEach(function (f) {
+      var opt = el('option', { value: f.id, text: fieldOptionLabel(f) });
+      if (f.id === selectedId) {
+        opt.selected = true;
+      }
+      sel.appendChild(opt);
+    });
+    onChange(sel.value); // a pruned/blank ref snaps to the first field
+    sel.addEventListener('change', function () { onChange(sel.value); });
+    return sel;
+  }
+
+  function fieldOptionLabel(f) {
+    var label = f.label || f.id;
+    return label.length > 40 ? label.slice(0, 40) + '…' : label;
+  }
+
+  // Keep select option texts in sync while a label is being typed (the
+  // selects themselves are only rebuilt on structural changes).
+  function refreshLogicLabels() {
+    Array.prototype.forEach.call(
+      logicListEl.querySelectorAll('select.logic-field option'),
+      function (opt) {
+        state.forEach(function (f) {
+          if (f.id === opt.value) {
+            opt.textContent = fieldOptionLabel(f);
+          }
+        });
+      }
+    );
   }
 
   function buildCard(field, idx) {
@@ -204,6 +384,7 @@
     labelInput.addEventListener('input', function () {
       field.label = labelInput.value;
       updatePreview(card, field);
+      refreshLogicLabels();
     });
     body.appendChild(controlRow('Label', labelInput));
 

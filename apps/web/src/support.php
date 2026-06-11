@@ -49,6 +49,7 @@ function render_page(string $view, array $vars = [], int $status = 200): void
         'content' => $content,
         'scripts' => $vars['scripts'] ?? [],
         'refresh' => $vars['refresh'] ?? null,
+        'embed' => !empty($vars['embed']),
     ]);
 }
 
@@ -90,7 +91,7 @@ function load_public_form(string $publicId): ?array
     }
 
     $row = DB::one(
-        'SELECT f.id, f.user_id, f.public_id, f.title, f.description, f.fields, f.webhook_url, f.is_published,
+        'SELECT f.id, f.user_id, f.public_id, f.title, f.description, f.fields, f.conditions, f.webhook_url, f.is_published,
                 f.submission_limit, f.thankyou_message, f.autoresponder_enabled,
                 u.email AS owner_email
            FROM forms f

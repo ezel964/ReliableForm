@@ -9,9 +9,11 @@ declare(strict_types=1);
  * @var array<string,mixed>|null $currentUser
  * @var list<string> $scripts
  * @var int|null $refresh
+ * @var bool $embed chrome-less variant for /f/{public_id}/embed (no nav/footer)
  */
 $scripts = $scripts ?? [];
 $refresh = $refresh ?? null;
+$embed = $embed ?? false;
 ?>
 <!doctype html>
 <html lang="en">
@@ -24,7 +26,8 @@ $refresh = $refresh ?? null;
 <?php endif; ?>
 <link rel="stylesheet" href="/assets/css/app.css">
 </head>
-<body>
+<body<?= $embed ? ' class="embed-page"' : '' ?>>
+<?php if (!$embed): ?>
 <header class="site-header">
   <div class="container header-bar">
     <a class="brand" href="/">Reliable<span>Form</span></a>
@@ -44,17 +47,20 @@ $refresh = $refresh ?? null;
     </nav>
   </div>
 </header>
+<?php endif; ?>
 <main class="container main">
   <?php foreach (safe_flashes() as $f): ?>
     <div class="flash flash-<?= e($f['type']) ?>" role="status"><?= e($f['msg']) ?></div>
   <?php endforeach; ?>
   <?= $content ?>
 </main>
+<?php if (!$embed): ?>
 <footer class="site-footer">
   <div class="container">
     served by <code><?= e(instance_id()) ?></code> · <a href="/status">system status</a>
   </div>
 </footer>
+<?php endif; ?>
 <script src="/assets/js/app.js" defer></script>
 <?php foreach ($scripts as $src): ?>
 <script src="<?= e($src) ?>" defer></script>

@@ -37,23 +37,6 @@ if (!is_array($answers)) {
 
 $fields = api_decode_fields((string) $form['fields']);
 
-// File fields are skipped by the API (JSON has no multipart): a required file
-// field can never be satisfied => 422 for it; optional ones are ignored and
-// any answer sent for them is dropped (they are excluded from validation, so
-// they never reach the stored data).
-$fileErrors = [];
-$validatable = [];
-foreach ($fields as $field) {
-    if (($field['type'] ?? '') === 'file') {
-        if (!empty($field['required'])) {
-            $fileErrors[(string) ($field['id'] ?? '')] =
-                'File uploads are not supported via the API. Use the public form for this required field.';
-        }
-        continue;
-    }
-    $validatable[] = $field;
-}
-
 // JSON clients naturally send numbers for number/rating fields; the shared
 // validator (validation.php) expects the strings $_POST would carry. Coerce
 // numeric scalars to strings — validation semantics stay identical.
@@ -68,6 +51,38 @@ foreach ($answers as $key => $value) {
         );
     }
     $normalized[(string) $key] = $value;
+}
+
+// Conditional logic, identical to the web submit path: visibility from the
+// RAW submitted answers; hidden fields are not required (a hidden required
+// file field never 422s either) and their answers are dropped — hidden data
+// is never stored.
+$conditions = json_decode((string) ($form['conditions'] ?? ''), true);
+$conditions = is_array($conditions) ? $conditions : [];
+$visibleMap = $conditions !== []
+    ? conditions_visible_fields($fields, $conditions, $normalized)
+    : [];
+
+// File fields are skipped by the API (JSON has no multipart): a required file
+// field can never be satisfied => 422 for it; optional ones are ignored and
+// any answer sent for them is dropped (they are excluded from validation, so
+// they never reach the stored data).
+$fileErrors = [];
+$validatable = [];
+foreach ($fields as $field) {
+    $fid = (string) ($field['id'] ?? '');
+    if ($conditions !== [] && !($visibleMap[$fid] ?? true)) {
+        unset($normalized[$fid]);
+        continue;
+    }
+    if (($field['type'] ?? '') === 'file') {
+        if (!empty($field['required'])) {
+            $fileErrors[$fid] =
+                'File uploads are not supported via the API. Use the public form for this required field.';
+        }
+        continue;
+    }
+    $validatable[] = $field;
 }
 
 $check = validate_submission($validatable, $normalized);

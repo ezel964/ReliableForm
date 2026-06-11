@@ -4,6 +4,11 @@ declare(strict_types=1);
 
 $publicId = (string) $params['public_id'];
 
+// Embed submits carry a hidden embed=1 so every response (errors, closed,
+// rate-limited, thanks redirect) stays inside the chrome-less variant.
+$embed = post_str('embed') === '1';
+$thanksUrl = '/f/' . $publicId . '/thanks' . ($embed ? '?embed=1' : '');
+
 $form = load_public_form($publicId);
 if ($form === null) {
     not_found('This form is not available.');
@@ -12,7 +17,7 @@ if ($form === null) {
 // Honeypot: real visitors never see/fill the "website" input. Pretend success.
 if (post_str('website') !== '') {
     Metrics::increment('web.submission.honeypot');
-    redirect('/f/' . $publicId . '/thanks');
+    redirect($thanksUrl);
 }
 
 // Unpublished or at its submission limit ⇒ 410 + closed page, before the
@@ -24,6 +29,7 @@ if ($closedReason !== null) {
         'title' => (string) $form['title'],
         'form' => $form,
         'reason' => $closedReason,
+        'embed' => $embed,
     ], 410);
     return;
 }
@@ -46,6 +52,7 @@ if ($rateLimit > 0) {
                 'title' => 'Slow down a moment',
                 'form' => $form,
                 'publicId' => $publicId,
+                'embed' => $embed,
             ], 429);
             return;
         }
@@ -68,15 +75,39 @@ if (!is_array($fileGroup)) {
     $fileGroup = [];
 }
 
-$check = validate_submission($fields, $answers, $fileGroup);
+// Conditional logic, server-side parity: visibility is computed from the RAW
+// submitted answers; hidden fields are not required and their answers are
+// dropped before validation/storage (hidden data is never stored).
+$conditions = json_decode((string) ($form['conditions'] ?? ''), true);
+$conditions = is_array($conditions) ? $conditions : [];
+$visibleFields = $fields;
+if ($conditions !== []) {
+    $visibleMap = conditions_visible_fields($fields, $conditions, $answers);
+    $visibleFields = [];
+    foreach ($fields as $field) {
+        $fid = (string) ($field['id'] ?? '');
+        if ($visibleMap[$fid] ?? true) {
+            $visibleFields[] = $field;
+        } else {
+            unset($answers[$fid]);
+            foreach (['name', 'type', 'tmp_name', 'error', 'size'] as $k) {
+                unset($fileGroup[$k][$fid]);
+            }
+        }
+    }
+}
+
+$check = validate_submission($visibleFields, $answers, $fileGroup);
 if (!$check['ok']) {
     render_page('public_form', [
         'title' => (string) $form['title'],
         'form' => $form,
         'fields' => $fields,
+        'conditions' => $conditions,
         'errors' => $check['errors'],
         'old' => $check['data'],
         'publicId' => $publicId,
+        'embed' => $embed,
     ]);
     return;
 }
@@ -118,9 +149,11 @@ if ($check['uploads'] !== []) {
             'title' => (string) $form['title'],
             'form' => $form,
             'fields' => $fields,
+            'conditions' => $conditions,
             'errors' => $storeErrors,
             'old' => $check['data'],
             'publicId' => $publicId,
+            'embed' => $embed,
         ]);
         return;
     }
@@ -221,4 +254,4 @@ try {
     }
 }
 
-redirect('/f/' . $publicId . '/thanks');
+redirect($thanksUrl);

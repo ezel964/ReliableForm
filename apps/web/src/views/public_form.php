@@ -3,13 +3,18 @@
 declare(strict_types=1);
 
 /**
- * Public form page — works fully without JavaScript.
+ * Public form page — works fully without JavaScript (logic rules then apply
+ * server-side only; app.js mirrors them live in the browser).
  * @var array<string,mixed> $form
  * @var list<array<string,mixed>> $fields
+ * @var list<array<string,mixed>> $conditions logic rules for the JS engine
  * @var array<string,string> $errors  field_id => message
  * @var array<string,mixed> $old      field_id => previous value(s)
  * @var string $publicId
+ * @var bool $embed chrome-less iframe variant
  */
+$conditions = $conditions ?? [];
+$embed = $embed ?? false;
 $hasFileField = false;
 foreach ($fields as $f) {
     if (($f['type'] ?? '') === 'file') {
@@ -30,6 +35,9 @@ foreach ($fields as $f) {
 
   <form method="post" action="/f/<?= e($publicId) ?>" class="stack"<?= $hasFileField ? ' enctype="multipart/form-data"' : '' ?>>
     <?= Csrf::field() ?>
+    <?php if ($embed): ?>
+      <input type="hidden" name="embed" value="1">
+    <?php endif; ?>
     <?php /* Honeypot — invisible to people, irresistible to bots. */ ?>
     <div class="hp" aria-hidden="true">
       <label>Website <input type="text" name="website" tabindex="-1" autocomplete="off"></label>
@@ -46,7 +54,7 @@ foreach ($fields as $f) {
       $error = $errors[$fid] ?? null;
       $value = $old[$fid] ?? ($type === 'checkbox' ? [] : '');
       ?>
-      <div class="form-row<?= $error !== null ? ' has-error' : '' ?>">
+      <div class="form-row<?= $error !== null ? ' has-error' : '' ?>" data-field="<?= e($fid) ?>">
         <?php if ($type === 'radio' || $type === 'checkbox' || $type === 'rating'): ?>
           <fieldset>
             <legend><?= e($label) ?><?php if ($required): ?><span class="req-star"> *</span><?php endif; ?></legend>
@@ -125,3 +133,9 @@ foreach ($fields as $f) {
     <button type="submit" class="btn btn-primary btn-large">Submit</button>
   </form>
 </div>
+<?php if ($conditions !== []): ?>
+<script type="application/json" id="rf-conditions"><?= json_encode(
+    $conditions,
+    JSON_HEX_TAG | JSON_HEX_AMP | JSON_UNESCAPED_UNICODE
+) ?: '[]' ?></script>
+<?php endif; ?>

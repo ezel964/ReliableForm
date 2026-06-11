@@ -12,5 +12,6 @@ render_page('builder', [
     'titleValue' => '',
     'descriptionValue' => '',
     'fields' => [],
+    'conditions' => [],
     'scripts' => ['/assets/js/builder.js'],
 ]);

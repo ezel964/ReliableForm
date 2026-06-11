@@ -18,6 +18,7 @@ if (PHP_SAPI === 'cli-server') {
 
 require RF_ROOT . '/apps/web/src/support.php';
 require RF_ROOT . '/apps/web/src/validation.php';
+require RF_ROOT . '/apps/web/src/conditions.php';
 
 header('X-Served-By: ' . instance_id());
 header('X-Trace-Id: ' . Trace::id());
@@ -174,6 +175,11 @@ if ($path === '/' && $method === 'GET') {
     $page = 'thanks';
     $params['public_id'] = $m[1];
     $routePattern = '/f/{public_id}/thanks';
+} elseif ($method === 'GET' && preg_match('#^/f/([a-z0-9]{10})/embed$#', $path, $m) === 1) {
+    $page = 'public_form';
+    $params['public_id'] = $m[1];
+    $params['embed'] = '1';
+    $routePattern = '/f/{public_id}/embed';
 } elseif ($path === '/healthz' && $method === 'GET') {
     $page = 'healthz';
     $routePattern = '/healthz';
