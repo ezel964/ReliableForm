@@ -14,6 +14,7 @@ $statusLabel = $statusLabel ?? 'pending';
 ?>
 <div class="card center-card">
   <?php if ($failed): ?>
+    <div class="big-info" aria-hidden="true">✕</div>
     <h1>PDF unavailable</h1>
     <p class="muted">We could not produce the PDF for submission #<?= (int) $submissionId ?>.</p>
     <?php if (!empty($error)): ?>
@@ -27,5 +28,5 @@ $statusLabel = $statusLabel ?? 'pending';
       This page refreshes automatically every 3&nbsp;seconds.
     </p>
   <?php endif; ?>
-  <p><a class="btn btn-ghost" href="/submissions/<?= (int) $submissionId ?>">&larr; Back to submission</a></p>
+  <p><a class="btn btn-secondary" href="/submissions/<?= (int) $submissionId ?>">&larr; Back to submission</a></p>
 </div>

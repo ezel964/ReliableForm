@@ -19,7 +19,8 @@ $embed = $embed ?? false;
   <?php else: ?>
     <p class="muted">
       Your response to &ldquo;<?= e((string) $form['title']) ?>&rdquo; was recorded.
+      We'll take it from here.
     </p>
   <?php endif; ?>
-  <p><a class="btn btn-ghost" href="/f/<?= e($publicId) ?><?= $embed ? '/embed' : '' ?>">Submit another response</a></p>
+  <p><a class="btn btn-secondary" href="/f/<?= e($publicId) ?><?= $embed ? '/embed' : '' ?>">Submit another response</a></p>
 </div>

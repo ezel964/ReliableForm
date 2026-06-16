@@ -59,18 +59,80 @@ ReliableForm/
 ├── db/seed.sql                idempotent (INSERT IGNORE) demo user + demo form
 ├── lib/                       shared PHP kernel (see "Kernel API")
 │   ├── bootstrap.php  Config.php  DB.php  RedisClient.php  Session.php
-│   ├── Auth.php  Csrf.php  Queue.php  Metrics.php  Pdf.php  helpers.php
+│   ├── Auth.php  Csrf.php  Queue.php  Metrics.php  Pdf.php  Trace.php
+│   ├── Otel.php  AppLog.php  FrontendLoader.php  helpers.php
+├── frontend/                  optional pnpm workspace (Rspack + TypeScript)
+│   ├── packages/libs/         @rf/router-bridge, @rf/request-layer, @rf/telemetry
+│   ├── packages/apps/         @rf/telemetry-entry (injectable browser bundle)
+│   ├── build/                 revision-hashed output + asset-manifest.json
+│   └── scripts/write-manifest.mjs
 ├── apps/
 │   ├── web/
 │   │   ├── public/index.php   front controller + router (also PHP -S router script)
 │   │   ├── public/assets/css/app.css
 │   │   ├── public/assets/js/app.js, builder.js
-│   │   └── src/pages/*.php, src/views/*.php
+│   │   └── src/api/rum.php, clientlog.php, dispatch.php (v1 beacons)
+│   │   └── src/pages/*.php, src/views/layout.php, spa_shell.php
 │   ├── status/server.js       Node service (dep: mysql2 only) + package.json
 │   └── workers/pdf_worker.php, email_worker.php
-└── storage/                   gitignored runtime data
+    └── storage/                   gitignored runtime data
     ├── pdfs/  mail/  logs/  run/
 ```
+
+## Frontend architecture (hybrid / strangler)
+
+Target shape mirrors JotForm's production frontend: **React SPAs** for rich
+authenticated surfaces (builder, dashboard — not built yet; future Plans 2 and
+3), bootstrapped by a PHP shell (`FrontendLoader` injecting
+`window.__rfrouter`), while **public forms stay server-rendered PHP**
+(cacheable). Plan 1 delivered the foundation (workspace, shared libs,
+`FrontendLoader`, nginx `/build/`) plus browser SRE on the existing PHP pages.
+
+Design references:
+`docs/superpowers/specs/2026-06-16-reliableform-react-stack-design.md`,
+`docs/superpowers/plans/2026-06-16-frontend-foundation.md`.
+
+### `frontend/` workspace (additive — PHP runs without it)
+
+pnpm workspace (Rspack + TypeScript, Node 18+). Build output lands in
+`frontend/build/` with revision-hashed filenames;
+`frontend/scripts/write-manifest.mjs` writes `asset-manifest.json` mapping
+logical entry names (`telemetry.js`) to hashed paths under `/build/`.
+
+| package | role |
+|---|---|
+| `@rf/router-bridge` | reads `window.__rfrouter` (mirrors JotForm router-bridge) |
+| `@rf/request-layer` | axios client: `withCredentials`, `X-CSRF-Token` on mutating calls, unwraps `{ok:true,...}` / `{ok:false,error:{...}}` into typed `ApiError` |
+| `@rf/telemetry` | `initTelemetry({page})`: patches fetch/XHR with W3C `traceparent` on same-origin API calls; web-vitals beacons to `/v1/rum`; `error` / `unhandledrejection` handlers beacon to `/v1/clientlog` via `navigator.sendBeacon` |
+| `@rf/telemetry-entry` | Rspack app that bundles `@rf/telemetry` → `frontend/build/telemetry.<hash>.js` |
+
+Build: `cd frontend && pnpm install && pnpm --filter @rf/telemetry-entry build`
+(or `pnpm build` for all apps). Tests: `cd frontend && pnpm -r test` (vitest).
+
+### PHP integration
+
+- `lib/FrontendLoader.php` — `FrontendLoader::render($app, $opts)` renders the
+  React host shell via `apps/web/src/views/spa_shell.php`: injects
+  `window.__rfrouter` (`ENV`, `ASSET_PATH=/build/`, `REVISION`, `TRACE_ID`,
+  `CSRF`, `BASE_PATH`, `ACTIVE_PAGE`), optional prefetched bootstrap JSON
+  (`<script type="application/json" id="rf-bootstrap">`), and revision-hashed
+  `<script>` tags from `frontend/build/asset-manifest.json`. Telemetry bundle
+  is always injected first.
+- `apps/web/src/views/layout.php` — existing PHP pages: stable `$rfPage` token,
+  `<body data-rf-page=...>`, injects the telemetry bundle and a minimal
+  `window.__rfrouter` bootstrap when the manifest exists (RUM/tracing/errors
+  without an SPA).
+- `config/nginx.conf.template` — `location /build/` serves
+  `{{ROOT}}/frontend/build/` with `expires 1y` and `Cache-Control: public,
+  immutable` (same pattern as `/assets/`). Re-render via `launch.sh` after
+  template changes.
+
+### Browser → backend tracing
+
+Same-origin browser API calls attach a custom W3C `traceparent` header (no
+browser OpenTelemetry SDK — mirrors JotForm's JF-Trace-Parent-ID approach).
+The header is adopted by `lib/Trace.php` on the PHP side so browser RUM and
+API traffic join the existing server trace model.
 
 ## Configuration — `.env`
 
@@ -101,6 +163,9 @@ SESSION_TTL=86400
 APPLOG_ENABLED=1                 # 0 ⇒ no app-*.jsonl writes (overhead A/B knob)
 RATE_LIMIT_SUBMIT_PER_MIN=30     # 0 ⇒ submission rate limit off
 API_RATE_LIMIT_PER_MIN=120       # per API key; 0 ⇒ off (iteration 2)
+RUM_SAMPLE_RATE=1.0              # server-side sampling for POST /v1/rum beacons (0–1)
+CLIENTLOG_ENABLED=1              # 0 ⇒ POST /v1/clientlog returns 204 without logging
+CLIENTLOG_RATE_PER_MIN=120       # per-IP fixed window for clientlog; 0 ⇒ off; Redis errors fail open
 ```
 
 ## MySQL schema (db/schema.sql)
@@ -163,6 +228,7 @@ checkbox which is `string[]`.
 | `stats:submissions:<YmdH>` | hourly INCR, EXPIRE 90000. Bucket name is **UTC**: PHP `gmdate('YmdH')`, Node `getUTCFullYear()...getUTCHours()` zero-padded. Never local time |
 | `ratelimit:login:<ip>`     | INCR + EXPIRE 60; reject login attempts when > 10     |
 | `ratelimit:submit:<public_id>:<ip>` | INCR + EXPIRE 60; 429 when > RATE_LIMIT_SUBMIT_PER_MIN (default 30, 0 disables). XFF-keyed ⇒ advisory only |
+| `ratelimit:clientlog:<ip>`   | INCR + EXPIRE 60; reject clientlog beacons when > CLIENTLOG_RATE_PER_MIN (default 120, 0 disables; Redis errors fail open) |
 | `cache:form:<public_id>`   | JSON form-row cache, TTL 60; DEL on form update       |
 
 ### Queue job protocol
@@ -249,7 +315,14 @@ heartbeat(string $instance): void
 public_id(): string                             // 10 chars [a-z0-9]
 request_ip(): string
 instance_id(): string                           // getenv('INSTANCE_ID') ?: 'unknown'
+
+FrontendLoader::render(string $app, array $opts = []): string
+  // SPA host shell: window.__rfrouter + optional bootstrap JSON + manifest scripts
+  // ($app = logical bundle name, e.g. 'dashboard'; telemetry.js always first)
 ```
+
+Pure helpers in `apps/web/src/api/support.php` (unit-tested): `rum_stat_for()`,
+`clientlog_fields()`, `clientlog_rate_ok()`.
 
 ## Web app (PHP) — routes
 
@@ -279,6 +352,8 @@ response sends header `X-Served-By: <instance_id>` and statsd metrics
 | `GET /healthz` | JSON `{"ok":bool,"instance":"web1","checks":{"db":bool,"redis":bool},"time":...}`; 200 or 503 |
 | `GET /forms/{id}/export.csv` | CSV export (iteration 2, see Product surface) |
 | `POST /account/api-key` | regenerate the user's API key (CSRF) |
+| `POST /v1/rum` | sessionless RUM beacon — Core Web Vitals JSON (also `text/plain` via `sendBeacon`); 204; sampled by `RUM_SAMPLE_RATE`; StatsD `web.client.<metric>` timings; skips `api_authenticate()` |
+| `POST /v1/clientlog` | sessionless JS error / unhandledrejection beacon; 204; gated by `CLIENTLOG_ENABLED`; per-IP `CLIENTLOG_RATE_PER_MIN`; AppLog `client_error`; StatsD `web.client.error`; skips auth |
 | `* /v1/...` | REST API v1 (iteration 2) — dispatched BEFORE the CSRF guard, sessionless |
 
 Ownership checks: all `/forms/*` and `/submissions/*` routes verify the form
@@ -310,6 +385,8 @@ Must start (with degraded output) even when MySQL/Redis are down.
 - `upstream web_backend { least_conn; server 127.0.0.1:{{WEB1_PORT}} max_fails=3 fail_timeout=5s; server 127.0.0.1:{{WEB2_PORT}} max_fails=3 fail_timeout=5s; }`
 - `location /status` and `location /api/` → `http://127.0.0.1:{{STATUS_PORT}}`
 - `location /assets/` → served directly from `{{ROOT}}/apps/web/public`
+- `location /build/` → served from `{{ROOT}}/frontend` (revision-hashed bundles
+  under `frontend/build/`; `expires 1y`, `Cache-Control: public, immutable`)
 - `location /` → `proxy_pass http://web_backend;` with `X-Forwarded-For`, `X-Request-Id ($request_id)`
 - `log_format sre '... $status rt=$request_time upstream=$upstream_addr urt=$upstream_response_time rid=$request_id'`
 
@@ -355,11 +432,13 @@ Demo login (seeded): `demo@reliableform.dev` / `demo1234`.
 - PHP: `declare(strict_types=1);` everywhere; PHP 8.2+; NO composer, NO
   external packages; prepared statements only; `e()` on all HTML output;
   `Csrf::validate()` on every POST.
-- Node: NO dependencies beyond `mysql2`; no build step.
+- Node (status service): NO dependencies beyond `mysql2`; no build step. The
+  optional `frontend/` workspace uses pnpm + Rspack (separate from status).
 - UI: clean & very readable. Single CSS file, system font stack, white cards on
   `#f6f7fb` background, accent `#f97316` (orange), max-width 1040px container,
-  visible focus states. No CSS/JS frameworks. The footer of every web page
-  shows `served by <instance_id>` (LB demo).
+  visible focus states. PHP pages use vanilla JS (builder, conditions) — no
+  CSS framework. Future builder/dashboard SPAs will be React (not built yet).
+  The footer of every web page shows `served by <instance_id>` (LB demo).
 - Every HTTP service exposes `/healthz` (workers are CLI loops — their
   liveness signal is the heartbeat key, not HTTP); every long-running loop
   heartbeats; every request/job emits statsd metrics (the hook for our SLI
@@ -376,6 +455,34 @@ observability layer is independently toggleable from `.env`:
 | statsd metrics (UDP) | always on (fire-and-forget) | — |
 | structured app log | `APPLOG_ENABLED=0` | zero (guard short-circuits) |
 | OTel traces | unset `OTEL_EXPORTER_OTLP_ENDPOINT` | zero (no buffering, no spool) |
+| browser RUM / client errors | no `frontend/build/asset-manifest.json` | zero (layout skips telemetry `<script>`) |
+| clientlog beacon | `CLIENTLOG_ENABLED=0` | beacons return 204, no AppLog/metrics |
+
+Initial frontend SLO targets (LCP p75 &lt; 2.5s, INP p75 &lt; 200ms, CLS p75
+&lt; 0.1, TTFB p75 &lt; 800ms, JS error rate &lt; 1% of sessions, public-form
+submit success &gt; 99%, builder save success &gt; 99.5%) are documented in
+`docs/SRE-GUIDE.md`. Browser metric names (`web.client.*`) and the
+`client_error` AppLog event are in `docs/METRICS.md`.
+
+### Browser telemetry (frontend + POST /v1/rum, /v1/clientlog)
+
+When built, `@rf/telemetry-entry` injects on every PHP page via `layout.php`
+(and on future SPA shells via `FrontendLoader`). `initTelemetry({page})`
+subscribes to web-vitals (LCP, INP, CLS, TTFB, FCP) and beacons JSON to
+`POST /v1/rum` (`rum.php`: server-side sampling via `RUM_SAMPLE_RATE`, emits
+StatsD timings `web.client.lcp|inp|cls|ttfb|fcp|fid`; CLS stored ×1000;
+malformed payloads bump `web.client.rum_malformed`). Window `error` and
+`unhandledrejection` handlers beacon to `POST /v1/clientlog` (`clientlog.php`:
+`CLIENTLOG_ENABLED` gate, per-IP `ratelimit:clientlog:<ip>` limit
+`CLIENTLOG_RATE_PER_MIN`, fails open on Redis errors; writes AppLog
+`client_error` with fields `kind`, `page`, `message`, `stack`, `url`, `line`,
+`col`, `ua`; bumps `web.client.error`; malformed →
+`web.client.clientlog_malformed`; rate limited →
+`web.client.clientlog_ratelimited`). Both endpoints are dispatched in
+`dispatch.php` and **skip** `api_authenticate()` (sessionless beacons).
+
+Fetch/XHR patching attaches W3C `traceparent` on same-origin API calls so
+browser traffic joins `Trace::start()` server spans (no browser OTEL SDK).
 
 ### Trace context (lib/Trace.php — implemented)
 
@@ -410,8 +517,10 @@ alone would never fire).
 `storage/logs/app-<instance>.jsonl` with automatic `ts`/`instance`/`event`/
 `trace_id`. Web request event: `event=http_request`, fields `method`, `route`,
 `status`, `dur_ms`, `request_id`, `user_id?`. Worker job event: `event=job`,
-fields `queue`, `submission_id`, `attempt`, `outcome`, `dur_ms`. String fields
-are truncated to 512 chars (atomic-append invariant: lines ≪ 8KB).
+fields `queue`, `submission_id`, `attempt`, `outcome`, `dur_ms`. Browser JS
+error event: `event=client_error`, fields `kind`, `page`, `message`, `stack`,
+`url`, `line`, `col`, `ua` (from POST /v1/clientlog). String fields are
+truncated to 512 chars (atomic-append invariant: lines ≪ 8KB).
 
 ### Submission rate limit
 
@@ -460,6 +569,8 @@ with codes: `unauthorized` 401, `not_found` 404, `method_not_allowed` 405,
 | `GET /v1/forms/{public_id}` | full definition incl. `fields` array (owner only; 404 otherwise) |
 | `GET /v1/forms/{public_id}/submissions?limit=&offset=` | `{"ok":true,"total":n,"submissions":[{id,created_at,data}]}` — limit ≤100 default 20, offset ≥0 |
 | `POST /v1/forms/{public_id}/submissions` | body `{"answers":{"<field_id>":value}}`, Content-Type must be application/json (else 415); identical validation + transaction + stats/queue side effects as the web submit path (incl. webhook_deliveries row when the form has a webhook); file fields per the widget section; 201 `{"ok":true,"submission":{"id":n}}` |
+| `POST /v1/rum` | browser Core Web Vitals beacon (see Observability — not key-authed) |
+| `POST /v1/clientlog` | browser JS error beacon (see Observability — not key-authed) |
 
 Targets the OWNER's forms only (the key authenticates the owner). Metrics:
 `api.request`, `api.request_ms`, `api.status.<code>`; the standard SERVER
@@ -721,7 +832,13 @@ cache/rate-limit only); the replica now defaults to the same:
 | `web.form.view` | c | public form GET (`/f/{public_id}` and `/embed`) |
 | `web.submission.closed` | c | submit rejected: unpublished or over `submission_limit` |
 | `queue.driver_fallback` | c | `QUEUE_DRIVER=auto` resolved to redis because gearmand was unreachable at push time (gearman configured but down) |
+| `web.client.lcp` etc. | t | browser Core Web Vitals from POST /v1/rum (`lcp`, `inp`, `cls`, `ttfb`, `fcp`, `fid`) |
+| `web.client.error` | c | JS error / unhandledrejection accepted by POST /v1/clientlog |
+| `web.client.rum_malformed` | c | invalid /v1/rum payload |
+| `web.client.clientlog_malformed` | c | invalid /v1/clientlog payload |
+| `web.client.clientlog_ratelimited` | c | /v1/clientlog rejected by per-IP rate limit |
 
 Route patterns for spans/logs: `/forms/{id}/settings`,
-`/f/{public_id}/embed` — everything else reuses existing patterns. The
-gearmand probe appears in `/api/status` as service `gearmand`.
+`/f/{public_id}/embed`, `POST /v1/rum`, `POST /v1/clientlog` — everything else
+reuses existing patterns. The gearmand probe appears in `/api/status` as service
+`gearmand`.

@@ -1,0 +1,12 @@
+packages:
+  - "packages/apps/*"
+  - "packages/libs/*"
+
+allowBuilds:
+  esbuild: set this to true or false
+
+onlyBuiltDependencies:
+  - esbuild
+  - "@rspack/core"
+
+verifyDepsBeforeRun: false

@@ -64,6 +64,32 @@ nc -ul 8125
 | `api.ratelimited` | c | request rejected with 429 (> `API_RATE_LIMIT_PER_MIN` per key) |
 | `api.submission.redis_degraded` | c | API submission committed but post-commit Redis work (stats INCR + queue pushes) failed — still 201 |
 
+### web.client.* (browser RUM — emitted by web1/web2 for `/v1/rum` + `/v1/clientlog` beacons)
+
+Frontend SRE: the telemetry bundle (`frontend/build/telemetry.*.js`, injected
+into every page by `layout.php` and the SPA shell) ships Core Web Vitals and JS
+errors as sessionless beacons. The PHP endpoints (`apps/web/src/api/rum.php`,
+`clientlog.php`) translate them into the statsd names below. RUM is sampled by
+`RUM_SAMPLE_RATE`; clientlog is per-IP rate limited (`CLIENTLOG_RATE_PER_MIN`,
+fails open) and gated by `CLIENTLOG_ENABLED`.
+
+| metric | type | when / meaning |
+|---|---|---|
+| `web.client.lcp` | ms | Largest Contentful Paint (Core Web Vital) |
+| `web.client.inp` | ms | Interaction to Next Paint |
+| `web.client.cls` | ms | Cumulative Layout Shift, unitless ×1000 (e.g. CLS 0.12 ⇒ 120) |
+| `web.client.ttfb` | ms | Time To First Byte (browser-observed) |
+| `web.client.fcp` | ms | First Contentful Paint |
+| `web.client.fid` | ms | First Input Delay (legacy; emitted only if a client still reports it) |
+| `web.client.error` | c | JS `error` / `unhandledrejection` reported to `/v1/clientlog` (also logged as `client_error`) |
+| `web.client.rum_malformed` | c | unparseable RUM beacon body |
+| `web.client.clientlog_malformed` | c | unparseable clientlog beacon body |
+| `web.client.clientlog_ratelimited` | c | clientlog beacon dropped by the per-IP limit |
+
+Note: `lib/Metrics.php` emits flat names (no tags), so page/rating dimensions
+are not attached at the statsd layer; the structured `client_error` AppLog event
+carries `page`/`kind` for error breakdowns.
+
 ### queue.* (lib/Queue.php — emitted by whichever process pushes/pops)
 
 | metric | type | when / meaning |
@@ -148,6 +174,22 @@ writes from concurrent processes never interleave.
 
 ```json
 {"ts":"2026-06-10T21:55:32.113Z","instance":"worker-pdf","event":"job","trace_id":"8ebc2ffd36d02e70fd4b7103ad125865","queue":"queue:pdf","submission_id":119,"attempt":0,"outcome":"done","dur_ms":6.2}
+```
+
+### `event: "client_error"` (web1/web2 — browser JS errors via `/v1/clientlog`)
+
+| field | meaning |
+|---|---|
+| `kind` | `error` \| `unhandledrejection` |
+| `page` | page token the error fired on (e.g. `dashboard`, `builder`, `public_form`) |
+| `message` | error message (clamped to 500 chars, AppLog clamps strings to 512 again) |
+| `stack` | stack trace (clamped) |
+| `url` | source URL / filename |
+| `line`, `col` | source position |
+| `ua` | user agent (clamped to 300) |
+
+```json
+{"ts":"2026-06-16T08:10:00.000Z","instance":"web1","event":"client_error","trace_id":"…","kind":"error","page":"builder","message":"Cannot read properties of undefined","stack":"at …","url":"http://localhost:8080/forms/new","line":12,"col":5,"ua":"Mozilla/5.0 …"}
 ```
 
 ## Spans

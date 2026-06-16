@@ -1,7 +1,14 @@
 .env
-apps/status/node_modules/
 storage/logs/
 storage/run/
 storage/pdfs/
 storage/mail/
 .DS_Store
+.superpowers/
+
+# Node dependencies (status service + frontend workspace)
+node_modules/
+
+# Frontend build artifacts (revision-hashed bundles + manifest, built on deploy)
+frontend/build/
+*.tsbuildinfo

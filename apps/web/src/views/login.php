@@ -12,17 +12,18 @@ declare(strict_types=1);
     <div class="form-row">
       <label for="login-email">Email</label>
       <input class="input" id="login-email" type="email" name="email" maxlength="255" required
-             value="<?= e($old['email']) ?>" autocomplete="email">
+             value="<?= e($old['email']) ?>" autocomplete="email" autofocus>
     </div>
     <div class="form-row">
       <label for="login-password">Password</label>
       <input class="input" id="login-password" type="password" name="password" required
              autocomplete="current-password">
     </div>
-    <button type="submit" class="btn btn-primary">Log in</button>
+    <button type="submit" class="btn btn-primary btn-large btn-block">Log in</button>
   </form>
   <p class="demo-hint">
-    Demo account: <code>demo@reliableform.dev</code> / <code>demo1234</code>
+    Just exploring? Demo account:<br>
+    <code>demo@reliableform.dev</code> / <code>demo1234</code>
   </p>
-  <p class="auth-alt">New here? <a href="/register">Create an account</a></p>
+  <p class="auth-alt">New here? <a href="/register">Create a free account</a></p>
 </div>

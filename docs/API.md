@@ -13,9 +13,12 @@ See also: [RUNBOOK.md](RUNBOOK.md) (operations, webhook surgery) ·
 - Base URL: `http://localhost:8080` (through the load balancer). The API
   lives under `/v1/` — **not** `/api/`, which nginx routes to the status
   service.
-- All requests and responses are JSON. Success envelope `{"ok":true,...}`,
-  error envelope below.
+- Authenticated endpoints use JSON request/response bodies. Success envelope
+  `{"ok":true,...}`, error envelope below. The two telemetry beacons (below)
+  are the exception: **204 No Content**, empty body, no JSON envelope.
 - The API is **sessionless**: no cookies are read or set. CSRF does not apply.
+  `POST /v1/rum` and `POST /v1/clientlog` are also **unauthenticated** — the
+  only `/v1` paths that skip API-key auth.
 - Every response carries `X-Trace-Id` (32 hex); error bodies repeat it as
   `error.trace_id` — quote it when filing a problem, it joins the app logs
   and spans (see [SRE-GUIDE.md](SRE-GUIDE.md)).
@@ -282,6 +285,71 @@ JSON has no multipart, so `file` widgets are excluded from API submissions:
 
 File uploads only work on the public web form (`POST /f/{public_id}`), and
 are write-only — see ARCHITECTURE.md.
+
+### Telemetry beacons
+
+Browser telemetry sinks used by the injected frontend bundle on PHP pages (and
+future React SPAs). Both are sessionless, **unauthenticated**, and return
+**204 No Content** with no body — not the `{"ok":...}` envelope. They accept
+`Content-Type: application/json` or `text/plain` (the default for
+`navigator.sendBeacon`). Malformed bodies still return 204; counters
+`web.client.rum_malformed` / `web.client.clientlog_malformed` track bad
+payloads. Full metric and SLO reference: [METRICS.md](METRICS.md),
+[SRE-GUIDE.md](SRE-GUIDE.md).
+
+#### POST /v1/rum
+
+Core Web Vitals beacon. Server-side sampling via `RUM_SAMPLE_RATE` (`.env`,
+default `1.0`; set `0` to drop all samples). Valid metrics become StatsD
+timings `web.client.lcp|inp|cls|ttfb|fcp|fid` (CLS value is scaled ×1000
+before emit). Unknown or malformed metric fields are dropped silently (still
+204).
+
+```bash
+curl -X POST http://localhost:8080/v1/rum \
+  -H "Content-Type: application/json" \
+  -d '{"metric":"LCP","value":1820.5,"id":"v3-...","page":"dashboard","nav":"navigate","rating":"good"}'
+```
+
+**204 No Content**, empty body. Example request body:
+
+```json
+{"metric":"LCP","value":1820.5,"id":"v3-...","page":"dashboard","nav":"navigate","rating":"good"}
+```
+
+| field | meaning |
+|---|---|
+| `metric` | one of `LCP`, `INP`, `CLS`, `TTFB`, `FCP`, `FID` |
+| `value` | numeric measurement (CLS is a fraction, e.g. `0.05`) |
+| `page` | stable page token from `data-rf-page` (e.g. `dashboard`, `public_form`) |
+| `id`, `nav`, `rating` | optional web-vitals metadata — stored only in the beacon, not echoed |
+
+#### POST /v1/clientlog
+
+JS error / unhandled-rejection beacon. Gated by `CLIENTLOG_ENABLED` (`.env`,
+default `1`; set `0` to no-op). Per-IP rate limit
+`CLIENTLOG_RATE_PER_MIN` (default `120`; Redis errors fail open). Each
+accepted report writes an AppLog `client_error` event and bumps
+`web.client.error`. Rate-limited drops bump `web.client.clientlog_ratelimited`.
+
+```bash
+curl -X POST http://localhost:8080/v1/clientlog \
+  -H "Content-Type: application/json" \
+  -d '{"kind":"error","message":"TypeError: x is not a function","stack":"...","page":"builder","url":"http://localhost:8080/forms/1/edit","line":12,"col":5}'
+```
+
+**204 No Content**, empty body. Example request body:
+
+```json
+{"kind":"error","message":"TypeError: x is not a function","stack":"...","page":"builder","url":"http://localhost:8080/forms/1/edit","line":12,"col":5}
+```
+
+| field | meaning |
+|---|---|
+| `kind` | `error` or `unhandledrejection` |
+| `message`, `stack` | error text (clamped server-side) |
+| `page` | stable page token |
+| `url`, `line`, `col` | source location when available |
 
 ## Webhooks
 

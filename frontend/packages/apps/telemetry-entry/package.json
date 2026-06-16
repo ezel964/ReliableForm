@@ -1,0 +1,18 @@
+{
+  "name": "@rf/telemetry-entry",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "build": "rspack build && node ../../../scripts/write-manifest.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@rf/telemetry": "workspace:*",
+    "@rf/router-bridge": "workspace:*"
+  },
+  "devDependencies": {
+    "@rspack/cli": "^1.1.0",
+    "@rspack/core": "^1.1.0",
+    "typescript": "^5.5.0"
+  }
+}

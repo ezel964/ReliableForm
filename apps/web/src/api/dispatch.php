@@ -19,6 +19,10 @@ $apiHandlers = null; // method => [route pattern, endpoint file]
 
 if ($path === '/v1/me') {
     $apiHandlers = ['GET' => ['GET /v1/me', 'me']];
+} elseif ($path === '/v1/rum') {
+    $apiHandlers = ['POST' => ['POST /v1/rum', 'rum']];
+} elseif ($path === '/v1/clientlog') {
+    $apiHandlers = ['POST' => ['POST /v1/clientlog', 'clientlog']];
 } elseif ($path === '/v1/forms') {
     $apiHandlers = ['GET' => ['GET /v1/forms', 'forms_index']];
 } elseif (preg_match('#^/v1/forms/([a-z0-9]{10})$#', $path, $m) === 1) {
@@ -51,6 +55,11 @@ if (!isset($apiHandlers[$method])) {
 [$routePattern, $apiEndpoint] = $apiHandlers[$method];
 
 // ---- auth (+ per-key rate limit), then the endpoint ------------------------
-$apiUser = api_authenticate();
+// Telemetry beacons (rum, clientlog) are sessionless and unauthenticated by
+// design — the browser cannot present an API key, and they only sink metrics.
+$beaconEndpoints = ['rum', 'clientlog'];
+if (!in_array($apiEndpoint, $beaconEndpoints, true)) {
+    $apiUser = api_authenticate();
+}
 
 require __DIR__ . '/' . $apiEndpoint . '.php';

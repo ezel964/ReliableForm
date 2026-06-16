@@ -135,6 +135,29 @@ collector at all.
 | end-to-end submission latency | cross-service | submission `POST /f/{public_id}` SERVER span start → `queue:pdf process` CONSUMER span end, joined by `trace_id` | also computable collector-free from `app-*.jsonl` (`http_request.ts` → `job.ts + dur_ms` with the same `trace_id`) |
 | telemetry pipeline health | otel sidecar | `reliableform.otel.spans_exported` vs `otel.spans_dropped`, `heartbeat:otel` | dropped > 0 ⇒ collector outage longer than 120s |
 
+## Frontend (browser) SLIs & SLOs
+
+Net-new client-side signals collected via the telemetry bundle (web-vitals +
+trace-header + JS error reporting) and the `/v1/rum` + `/v1/clientlog` beacons.
+This is the frontend SRE layer — server-side metrics above are blind to what the
+browser experiences. Browser→backend traces join via `traceparent` (the bundle
+patches `fetch`/`XHR`; `lib/Trace.php` adopts the header on ingress), so a slow
+client API call can be followed straight into the server span.
+
+| SLI | source | initial SLO target |
+|---|---|---|
+| Largest Contentful Paint | `reliableform.web.client.lcp` timing | p75 < 2.5 s |
+| Interaction to Next Paint | `reliableform.web.client.inp` timing | p75 < 200 ms |
+| Cumulative Layout Shift | `reliableform.web.client.cls` (×1000) timing | p75 < 0.1 (i.e. < 100) |
+| Time To First Byte (browser) | `reliableform.web.client.ttfb` timing | p75 < 800 ms |
+| JS error rate | `reliableform.web.client.error` vs page views (`web.request` / RUM volume) | < 1% of sessions |
+| Public-form submit success (browser-observed) | submit fetch success vs failure (Plan 2/3 instrumentation) + server `web.submission` | > 99% |
+| Builder save success | builder save fetch success (Plan 3) | > 99.5% |
+
+Knobs: `RUM_SAMPLE_RATE` (beacon sampling), `CLIENTLOG_ENABLED`,
+`CLIENTLOG_RATE_PER_MIN` (per-IP, fails open). Error breakdowns by page come from
+the `client_error` AppLog event (`page`/`kind`), since statsd names are flat.
+
 ## Overhead measurement methodology (A/B protocol)
 
 Loadgen reports **server-side** latency (nginx `rt=` percentiles over the

@@ -24,13 +24,15 @@ foreach ($fields as $f) {
 }
 ?>
 <div class="public-form card">
-  <h1><?= e((string) $form['title']) ?></h1>
-  <?php if (!empty($form['description'])): ?>
-    <p class="form-description"><?= nl2br(e((string) $form['description'])) ?></p>
-  <?php endif; ?>
+  <div class="public-form-head">
+    <h1><?= e((string) $form['title']) ?></h1>
+    <?php if (!empty($form['description'])): ?>
+      <p class="form-description"><?= nl2br(e((string) $form['description'])) ?></p>
+    <?php endif; ?>
+  </div>
 
   <?php if ($errors !== []): ?>
-    <div class="flash flash-error" role="alert">Please fix the highlighted answers below.</div>
+    <div class="error-summary" role="alert">Please fix the highlighted answers below.</div>
   <?php endif; ?>
 
   <form method="post" action="/f/<?= e($publicId) ?>" class="stack"<?= $hasFileField ? ' enctype="multipart/form-data"' : '' ?>>
@@ -57,7 +59,7 @@ foreach ($fields as $f) {
       <div class="form-row<?= $error !== null ? ' has-error' : '' ?>" data-field="<?= e($fid) ?>">
         <?php if ($type === 'radio' || $type === 'checkbox' || $type === 'rating'): ?>
           <fieldset>
-            <legend><?= e($label) ?><?php if ($required): ?><span class="req-star"> *</span><?php endif; ?></legend>
+            <legend><?= e($label) ?><?php if ($required): ?><span class="req-star" aria-hidden="true"> *</span><?php endif; ?></legend>
 
             <?php if ($type === 'rating'): ?>
               <?php $max = (int) ($field['max'] ?? 5); ?>
@@ -96,7 +98,7 @@ foreach ($fields as $f) {
             <?php endif; ?>
           </fieldset>
         <?php else: ?>
-          <label for="fld-<?= e($fid) ?>"><?= e($label) ?><?php if ($required): ?><span class="req-star"> *</span><?php endif; ?></label>
+          <label for="fld-<?= e($fid) ?>"><?= e($label) ?><?php if ($required): ?><span class="req-star" aria-hidden="true"> *</span><?php endif; ?></label>
 
           <?php if ($type === 'textarea'): ?>
             <textarea class="input" id="fld-<?= e($fid) ?>" name="answers[<?= e($fid) ?>]" rows="4"

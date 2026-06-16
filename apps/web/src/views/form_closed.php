@@ -8,6 +8,7 @@ declare(strict_types=1);
  */
 ?>
 <div class="card center-card">
+  <div class="big-info" aria-hidden="true">⏸</div>
   <h1>This form is closed</h1>
   <p class="muted">
     <?php if ($reason === 'limit'): ?>

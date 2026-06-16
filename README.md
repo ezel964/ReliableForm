@@ -54,8 +54,21 @@ Test the stack you just launched ([docs/TESTING.md](docs/TESTING.md)):
 ```bash
 bash tests/run-unit.sh           # PHP unit tests
 (cd apps/status && npm test)     # Node unit tests
+(cd frontend && pnpm -r test)    # frontend lib tests (vitest)
 bash tests/e2e.sh                # end-to-end regression gate (live stack)
 ```
+
+Optional — browser RUM, trace propagation, and JS error reporting on the
+existing PHP pages (requires Node 18+ and pnpm; the PHP app runs fine without
+it):
+
+```bash
+cd frontend && pnpm install && pnpm --filter @rf/telemetry-entry build
+bash launch.sh restart           # re-render nginx so /build/ is served
+```
+
+Telemetry scripts are injected only when `frontend/build/asset-manifest.json`
+exists (built output from `@rf/telemetry-entry`).
 
 Then open:
 
@@ -121,7 +134,21 @@ worker-webhook otel nginx`).
   workers and leaves the stack again on webhook deliveries (`traceparent` to
   your receiver). Spans spool locally and ship via the `otel` sidecar; enable
   with one line in `.env`:
-  `OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318`.
+  `OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318`. When the frontend
+  telemetry bundle is built, browser fetch/XHR to same-origin APIs also carry
+  `traceparent` (custom header — no browser OpenTelemetry SDK) so RUM and API
+  calls join the same trace.
+- **Browser telemetry (optional — requires `frontend/` build):** the
+  `@rf/telemetry` bundle injects on every PHP page when
+  `frontend/build/asset-manifest.json` exists. Core Web Vitals beacon to
+  `POST /v1/rum` (StatsD timings `web.client.lcp|inp|cls|ttfb|fcp|fid`; CLS
+  scaled ×1000; server-side sampling via `RUM_SAMPLE_RATE`). JS errors and
+  unhandled rejections beacon to `POST /v1/clientlog` (AppLog `client_error`,
+  StatsD `web.client.error`; gated by `CLIENTLOG_ENABLED`, per-IP rate limit
+  `CLIENTLOG_RATE_PER_MIN`). Initial frontend SLO targets (LCP/INP/CLS/TTFB,
+  JS error rate, submit/save success) live in
+  [docs/SRE-GUIDE.md](docs/SRE-GUIDE.md); metric names in
+  [docs/METRICS.md](docs/METRICS.md).
 - **Structured logs:** one JSON line per request/job in
   `storage/logs/app-<instance>.jsonl`, each carrying `trace_id`
   (`APPLOG_ENABLED=0` turns it off).
@@ -150,17 +177,23 @@ recipes incl. deterministic retry-then-deliver: [docs/RUNBOOK.md](docs/RUNBOOK.m
 ## Layout
 
 ```
-apps/web/      PHP web app (the only thing users see) — routes in public/index.php
+apps/web/      PHP web app — routes in public/index.php; api/rum.php, api/clientlog.php
+               (sessionless telemetry beacons); views/layout.php injects browser
+               telemetry when built; FrontendLoader hosts future React SPAs
 apps/status/   Node status & analytics service (dep: mysql2 only)
 apps/workers/  pdf_worker.php, email_worker.php, webhook_worker.php,
                otel_shipper.php (PHP CLI loops)
+frontend/      optional pnpm workspace (Rspack + TypeScript): shared libs
+               (@rf/router-bridge, @rf/request-layer, @rf/telemetry) and
+               @rf/telemetry-entry → revision-hashed bundles in frontend/build/
 lib/           shared PHP kernel: Config, DB, RedisClient (pure-PHP RESP),
                Session (Redis), Auth, Csrf, Queue, Metrics, Pdf (dependency-free
-               PDF writer), Trace, Otel, AppLog, helpers
-config/        nginx.conf.template (rendered to storage/run/nginx.conf at launch)
+               PDF writer), Trace, Otel, AppLog, FrontendLoader, helpers
+config/        nginx.conf.template (rendered to storage/run/nginx.conf at launch;
+               serves /build/ from frontend/build/)
 db/            schema.sql + seed.sql (idempotent) + migrations/ (applied by setup.sh)
 tools/         webhook-sink.php — local webhook receiver with failure-drill modes
-tests/         PHP/Node unit suites + e2e regression gate (docs/TESTING.md)
+tests/         PHP/Node/frontend unit suites + e2e regression gate (docs/TESTING.md)
 docs/          operator & developer docs (index below)
 storage/       runtime: logs/, run/ (pids+conf), pdfs/, mail/, uploads/
 ```
@@ -176,5 +209,9 @@ storage/       runtime: logs/, run/ (pids+conf), pdfs/, mail/, uploads/
 | [docs/METRICS.md](docs/METRICS.md) | every metric, log event, and span that exists |
 | [docs/TESTING.md](docs/TESTING.md) | unit/node/e2e test suites and how to run them |
 
-No frameworks, no composer, one npm dependency. Everything is small and
-readable on purpose — it's a lab bench, not a product.
+PHP: no composer, no PHP frameworks. Node status service: one npm dependency.
+An optional `frontend/` pnpm workspace (Rspack + TypeScript) builds browser
+telemetry today and will host React SPAs for the builder and dashboard in later
+plans; public forms stay server-rendered PHP. The PHP app runs standalone —
+the frontend build is additive, and telemetry is injected only when built.
+Everything is small and readable on purpose — it's a lab bench, not a product.

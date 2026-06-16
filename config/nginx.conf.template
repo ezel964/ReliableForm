@@ -72,6 +72,16 @@ http {
             expires 5m;
         }
 
+        # Revision-hashed React bundles (content-addressed) — cache hard, the
+        # filename hash busts the cache on every build. asset-manifest.json
+        # itself is served here too (short cache is fine; PHP reads it off disk).
+        location /build/ {
+            root {{ROOT}}/frontend;
+            expires 1y;
+            add_header Cache-Control "public, immutable";
+            try_files $uri =404;
+        }
+
         # Node status & analytics service.
         location /status {
             proxy_pass http://127.0.0.1:{{STATUS_PORT}};

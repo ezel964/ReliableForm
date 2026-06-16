@@ -26,28 +26,28 @@ $to = min($page * $perPage, $total);
 ?>
 <div class="page-head">
   <div>
-    <h1>Submissions</h1>
-    <p class="muted">
-      <?= e((string) $form['title']) ?>
-      · <?= $views === null ? '—' : (int) $views ?> view<?= $views === 1 ? '' : 's' ?>
-      · <?= $totalAll ?> submission<?= $totalAll === 1 ? '' : 's' ?>
-      · <?= e(conversion_label($totalAll, $views)) ?> conversion
-    </p>
+    <h1>Inbox</h1>
+    <p class="muted"><?= e((string) $form['title']) ?></p>
+    <div class="stat-chips">
+      <span class="stat-chip"><strong><?= $views === null ? '—' : (int) $views ?></strong> view<?= $views === 1 ? '' : 's' ?></span>
+      <span class="stat-chip"><strong><?= $totalAll ?></strong> submission<?= $totalAll === 1 ? '' : 's' ?></span>
+      <span class="stat-chip"><strong><?= e(conversion_label($totalAll, $views)) ?></strong> conversion</span>
+    </div>
   </div>
   <div class="page-head-actions">
-    <a class="btn btn-ghost" href="/forms/<?= $formId ?>/export.csv">Export CSV</a>
-    <a class="btn btn-ghost" href="/forms/<?= $formId ?>/settings">Settings</a>
-    <a class="btn btn-ghost" href="<?= e(public_form_url((string) $form['public_id'])) ?>" target="_blank" rel="noopener">Open public form</a>
-    <a class="btn btn-ghost" href="/dashboard">&larr; Dashboard</a>
+    <a class="btn btn-secondary" href="/forms/<?= $formId ?>/export.csv">Export CSV</a>
+    <a class="btn btn-secondary" href="/forms/<?= $formId ?>/settings">Settings</a>
+    <a class="btn btn-secondary" href="<?= e(public_form_url((string) $form['public_id'])) ?>" target="_blank" rel="noopener">Open public form</a>
   </div>
 </div>
 
 <?php if ($totalAll > 0 || $q !== ''): ?>
-  <form method="get" action="/forms/<?= $formId ?>/submissions" class="card search-bar" style="display:flex;gap:10px;align-items:center;padding:14px 20px;margin-bottom:18px">
-    <input class="input" type="search" name="q" placeholder="Search answers…" value="<?= e($q) ?>" style="flex:1">
-    <button type="submit" class="btn btn-ghost">Search</button>
+  <form method="get" action="/forms/<?= $formId ?>/submissions" class="card search-bar" role="search">
+    <label class="visually-hidden" for="inbox-search">Search answers</label>
+    <input class="input" id="inbox-search" type="search" name="q" placeholder="Search answers…" value="<?= e($q) ?>">
+    <button type="submit" class="btn btn-secondary">Search</button>
     <?php if ($q !== ''): ?>
-      <a class="btn btn-ghost btn-small" href="/forms/<?= $formId ?>/submissions">Clear</a>
+      <a class="btn btn-ghost" href="/forms/<?= $formId ?>/submissions">Clear</a>
     <?php endif; ?>
   </form>
   <?php if ($q !== ''): ?>
@@ -60,12 +60,14 @@ $to = min($page * $perPage, $total);
 <?php if ($rows === []): ?>
   <?php if ($q !== ''): ?>
     <div class="card empty-state">
+      <div class="empty-glyph" aria-hidden="true">∅</div>
       <h2>Nothing matches your search</h2>
       <p>No submission contains &ldquo;<?= e($q) ?>&rdquo;.</p>
-      <p><a class="btn btn-ghost" href="/forms/<?= $formId ?>/submissions">Show all submissions</a></p>
+      <p><a class="btn btn-secondary" href="/forms/<?= $formId ?>/submissions">Show all submissions</a></p>
     </div>
   <?php else: ?>
     <div class="card empty-state">
+      <div class="empty-glyph" aria-hidden="true">⊞</div>
       <h2>No submissions yet</h2>
       <p>Share the public link and responses will appear here:</p>
       <p>
@@ -79,22 +81,22 @@ $to = min($page * $perPage, $total);
     <table class="table">
       <thead>
         <tr>
-          <th>#</th>
-          <th>Submitted</th>
-          <th>Answers</th>
-          <th>PDF</th>
-          <th class="th-actions"></th>
+          <th scope="col">#</th>
+          <th scope="col">Submitted</th>
+          <th scope="col">Answers</th>
+          <th scope="col">PDF</th>
+          <th scope="col" class="th-actions"><span class="visually-hidden">Actions</span></th>
         </tr>
       </thead>
       <tbody>
         <?php foreach ($rows as $row): ?>
           <tr>
-            <td><a href="/submissions/<?= (int) $row['id'] ?>">#<?= (int) $row['id'] ?></a></td>
-            <td><?= e((string) $row['created_at']) ?> UTC</td>
-            <td class="muted small"><?= e((string) ($row['preview'] ?? '')) ?></td>
+            <td class="cell-num"><a href="/submissions/<?= (int) $row['id'] ?>">#<?= (int) $row['id'] ?></a></td>
+            <td class="cell-num muted"><?= e((string) $row['created_at']) ?> UTC</td>
+            <td class="muted small cell-preview" title="<?= e((string) ($row['preview'] ?? '')) ?>"><?= e((string) ($row['preview'] ?? '')) ?></td>
             <td><?= status_badge((string) ($row['pdf_status'] ?? 'pending')) ?></td>
             <td class="cell-actions">
-              <a class="btn btn-ghost btn-small" href="/submissions/<?= (int) $row['id'] ?>">View</a>
+              <a class="btn btn-secondary btn-small" href="/submissions/<?= (int) $row['id'] ?>">View</a>
             </td>
           </tr>
         <?php endforeach; ?>
@@ -102,15 +104,15 @@ $to = min($page * $perPage, $total);
     </table>
   </div>
 
-  <div class="page-head" style="margin-top:18px">
+  <nav class="pagination" aria-label="Submission pages">
     <p class="muted small">Showing <?= $from ?>&ndash;<?= $to ?> of <?= $total ?></p>
-    <div class="page-head-actions">
+    <div class="pagination-links">
       <?php if ($page > 1): ?>
-        <a class="btn btn-ghost btn-small" href="<?= e($pageUrl($page - 1)) ?>">&larr; Newer</a>
+        <a class="btn btn-secondary btn-small" href="<?= e($pageUrl($page - 1)) ?>">&larr; Newer</a>
       <?php endif; ?>
       <?php if ($page < $lastPage): ?>
-        <a class="btn btn-ghost btn-small" href="<?= e($pageUrl($page + 1)) ?>">Older &rarr;</a>
+        <a class="btn btn-secondary btn-small" href="<?= e($pageUrl($page + 1)) ?>">Older &rarr;</a>
       <?php endif; ?>
     </div>
-  </div>
+  </nav>
 <?php endif; ?>

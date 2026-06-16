@@ -12,7 +12,7 @@ declare(strict_types=1);
     <div class="form-row">
       <label for="reg-name">Your name</label>
       <input class="input" id="reg-name" type="text" name="name" maxlength="100" required
-             value="<?= e($old['name']) ?>" autocomplete="name">
+             value="<?= e($old['name']) ?>" autocomplete="name" autofocus>
     </div>
     <div class="form-row">
       <label for="reg-email">Email</label>
@@ -22,10 +22,10 @@ declare(strict_types=1);
     <div class="form-row">
       <label for="reg-password">Password</label>
       <input class="input" id="reg-password" type="password" name="password" minlength="8" required
-             autocomplete="new-password">
-      <p class="hint">At least 8 characters.</p>
+             autocomplete="new-password" aria-describedby="reg-password-hint">
+      <p class="hint" id="reg-password-hint">At least 8 characters.</p>
     </div>
-    <button type="submit" class="btn btn-primary">Sign up</button>
+    <button type="submit" class="btn btn-primary btn-large btn-block">Sign up</button>
   </form>
   <p class="auth-alt">Already have an account? <a href="/login">Log in</a></p>
 </div>

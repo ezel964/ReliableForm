@@ -156,3 +156,77 @@ function api_decode_fields(string $json): array
     $decoded = json_decode($json, true);
     return (is_array($decoded) && array_is_list($decoded)) ? $decoded : [];
 }
+
+/**
+ * Frontend SRE — pure helpers (no I/O, unit-testable).
+ * The browser ships Core Web Vitals to POST /v1/rum and JS errors to
+ * POST /v1/clientlog; both are sessionless beacons that sink into the existing
+ * StatsD / AppLog pipeline.
+ */
+
+/**
+ * Map a web-vitals beacon to a single StatsD timing, or null when the payload
+ * is not a metric we accept. CLS is unitless so we scale ×1000 for an
+ * integer-friendly StatsD value; the others are already milliseconds.
+ *
+ * @param array<string, mixed> $payload
+ * @return array{stat: string, value: float}|null
+ */
+function rum_stat_for(array $payload): ?array
+{
+    $allowed = ['LCP' => 'lcp', 'INP' => 'inp', 'CLS' => 'cls', 'TTFB' => 'ttfb', 'FCP' => 'fcp', 'FID' => 'fid'];
+    $metric = is_string($payload['metric'] ?? null) ? $payload['metric'] : '';
+    if (!isset($allowed[$metric]) || !is_numeric($payload['value'] ?? null)) {
+        return null;
+    }
+    $value = (float) $payload['value'];
+    $statValue = $metric === 'CLS' ? round($value * 1000) : $value;
+    return ['stat' => 'web.client.' . $allowed[$metric], 'value' => $statValue];
+}
+
+/**
+ * Normalise a JS error/rejection beacon into AppLog fields. Page is reduced to
+ * a safe token; strings are clamped (AppLog clamps again at 512).
+ *
+ * @param array<string, mixed> $payload
+ * @return array<string, mixed>
+ */
+function clientlog_fields(array $payload, string $ua): array
+{
+    $kind = in_array($payload['kind'] ?? '', ['error', 'unhandledrejection'], true) ? $payload['kind'] : 'error';
+    $page = preg_replace('/[^a-z0-9_]/', '', strtolower((string) ($payload['page'] ?? 'unknown'))) ?: 'unknown';
+    return [
+        'kind' => $kind,
+        'page' => $page,
+        'message' => mb_substr((string) ($payload['message'] ?? ''), 0, 500),
+        'stack' => mb_substr((string) ($payload['stack'] ?? ''), 0, 2000),
+        'url' => mb_substr((string) ($payload['url'] ?? ''), 0, 500),
+        'line' => (int) ($payload['line'] ?? 0),
+        'col' => (int) ($payload['col'] ?? 0),
+        'ua' => mb_substr($ua, 0, 300),
+    ];
+}
+
+/**
+ * Per-IP fixed-window limit for the clientlog beacon, mirroring api_rate_limit:
+ * ratelimit:clientlog:<ip>, INCR + EXPIRE 60. Fails OPEN (returns true) on any
+ * Redis error — observability must never reject a request because Redis blinked.
+ */
+function clientlog_rate_ok(string $ip): bool
+{
+    $limit = (int) Config::get('CLIENTLOG_RATE_PER_MIN', '120');
+    if ($limit <= 0) {
+        return true;
+    }
+    try {
+        $redis = RedisClient::instance();
+        $rateKey = 'ratelimit:clientlog:' . $ip;
+        $count = $redis->incr($rateKey);
+        if ($count === 1) {
+            $redis->expire($rateKey, 60);
+        }
+        return $count <= $limit;
+    } catch (RedisException) {
+        return true;
+    }
+}

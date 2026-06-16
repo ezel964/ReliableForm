@@ -266,6 +266,58 @@ mysql -h 127.0.0.1 -u reliableform -preliableform reliableform \
 Never edit an applied migration — ship a new one. If a migration ran but
 recording failed, setup says so and prints the exact `INSERT` to run by hand.
 
+## Frontend bundle & client telemetry
+
+Plan 1 added a `frontend/` pnpm workspace (Rspack + TypeScript) that builds
+hashed JS bundles served by nginx. PHP pages already inject the telemetry
+bundle when it exists; the React dashboard/builder SPAs are not wired yet.
+
+Build the injectable telemetry bundle (requires **pnpm**):
+
+```bash
+cd frontend && pnpm install && pnpm --filter @rf/telemetry-entry build
+```
+
+Outputs:
+
+- `frontend/build/telemetry.<hash>.js` — RUM, trace propagation, JS error reporting
+- `frontend/build/asset-manifest.json` — revision-hashed paths read by
+  `apps/web/src/views/layout.php` (and future `FrontendLoader` SPAs)
+
+Nginx serves bundles at `/build/` from disk (`config/nginx.conf.template` →
+`location /build/` under `frontend/`). After changing the nginx template,
+re-render and reload:
+
+```bash
+bash launch.sh restart    # re-renders storage/run/nginx.conf from the template
+```
+
+Verify: `curl -I http://localhost:8080/build/telemetry.<hash>.js` → **200**
+with long-lived cache headers.
+
+Frontend tests:
+
+```bash
+cd frontend && pnpm -r test
+```
+
+Backend beacon tests: `bash tests/run-unit.sh` (includes `test_rum.php`,
+`test_clientlog.php`, `test_frontend_loader.php`).
+
+### Telemetry env knobs (`.env`)
+
+| variable | default | effect |
+|---|---|---|
+| `RUM_SAMPLE_RATE` | `1.0` | fraction of `/v1/rum` beacons that emit StatsD timings; `0` disables sampling |
+| `CLIENTLOG_ENABLED` | `1` | set `0` to accept but discard all `/v1/clientlog` beacons (still 204) |
+| `CLIENTLOG_RATE_PER_MIN` | `120` | per-IP cap on clientlog accepts; over-limit drops bump `web.client.clientlog_ratelimited` (Redis fail-open) |
+
+To disable client telemetry entirely for a drill: `CLIENTLOG_ENABLED=0` and
+`RUM_SAMPLE_RATE=0`, then restart web instances (`bash launch.sh restart`).
+
+Metrics, AppLog `client_error` events, and frontend SLO targets:
+[METRICS.md](METRICS.md) · [SRE-GUIDE.md](SRE-GUIDE.md).
+
 ## Uploads
 
 Public-form file uploads land in `storage/uploads/<form_public_id>/` with
@@ -317,3 +369,5 @@ $remote_addr [$time_local] "$request" $status $body_bytes_sent rt=$request_time 
 | worker shows "alive but no heartbeat" | Redis down or the worker is stuck in a job — check `storage/logs/worker-*.log`, then `bash launch.sh kill worker-pdf && bash launch.sh start` |
 | submissions saved but no PDF/email ever appears | jobs were lost while Redis was down (rows stay `pending`). Re-push by hand (see Queue surgery) using the submission id. |
 | webhook delivery stuck `pending` forever | same cause: the queue push was lost (or `worker-webhook` is down — check `/status`). Re-push per Webhook operations → Replay. |
+| no RUM/JS errors in metrics; pages lack telemetry script | frontend bundle not built — run the build in Frontend bundle & client telemetry; layout only injects when `frontend/build/asset-manifest.json` exists |
+| `/build/...` returns 404 | bundle missing or nginx config stale — build the frontend bundle, then `bash launch.sh restart` to re-render nginx |

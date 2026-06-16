@@ -1,0 +1,630 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ReliableForm — Architecture & SRE/SLO</title>
+<style>
+  :root{
+    --bg0:#05070c;
+    --stage:#0b0f17;
+    --panel:#121925;
+    --panel2:#172131;
+    --panelhi:#1d2a3d;
+    --line:#243144;
+    --line2:#2f4259;
+    --ink:#eaf0f8;
+    --muted:#8d9cb3;
+    --faint:#5d6c83;
+    --accent:#f97316;
+    --accent2:#fbbf24;
+    --cyan:#38bdf8;
+    --violet:#a78bfa;
+    --green:#34d399;
+    --red:#fb7185;
+    --amber:#fbbf24;
+    --mono:"SFMono-Regular",ui-monospace,Consolas,Menlo,monospace;
+    --sans:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;}
+  html,body{height:100%;}
+  body{
+    background:
+      radial-gradient(1200px 700px at 80% -10%, rgba(249,115,22,.12), transparent 60%),
+      radial-gradient(1000px 600px at 0% 110%, rgba(56,189,248,.10), transparent 55%),
+      var(--bg0);
+    font-family:var(--sans);color:var(--ink);overflow:hidden;
+    -webkit-font-smoothing:antialiased;
+  }
+
+  /* 16:9 fixed stage, scaled to viewport */
+  #stage{
+    position:absolute;top:50%;left:50%;
+    width:1280px;height:720px;
+    transform-origin:center center;
+    background:
+      radial-gradient(900px 500px at 100% 0%, rgba(249,115,22,.10), transparent 55%),
+      radial-gradient(700px 500px at 0% 100%, rgba(167,139,250,.08), transparent 55%),
+      linear-gradient(160deg,#0d121c 0%, #0a0e16 100%);
+    border:1px solid #1b2535;border-radius:18px;overflow:hidden;
+    box-shadow:0 40px 120px rgba(0,0,0,.6), inset 0 1px 0 rgba(255,255,255,.04);
+  }
+
+  .slide{
+    position:absolute;inset:0;
+    padding:46px 60px 64px;
+    display:none;flex-direction:column;
+    opacity:0;
+  }
+  .slide.active{display:flex;animation:in .4s cubic-bezier(.2,.7,.2,1) forwards;}
+  @keyframes in{from{opacity:0;transform:translateY(10px);}to{opacity:1;transform:none;}}
+
+  .kicker{
+    display:inline-flex;align-items:center;gap:8px;align-self:flex-start;
+    font-size:11px;font-weight:700;letter-spacing:.18em;text-transform:uppercase;
+    color:var(--accent2);
+    background:linear-gradient(90deg,rgba(249,115,22,.16),rgba(249,115,22,.04));
+    border:1px solid rgba(249,115,22,.28);
+    padding:6px 12px;border-radius:999px;margin-bottom:16px;
+  }
+  .kicker::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--accent);box-shadow:0 0 10px var(--accent);}
+
+  h1{font-size:58px;line-height:1.04;letter-spacing:-.03em;font-weight:800;}
+  h2{font-size:34px;line-height:1.08;letter-spacing:-.02em;font-weight:800;margin-bottom:18px;}
+  h2 .accent{color:var(--accent);}
+  h3{font-size:15px;font-weight:700;letter-spacing:-.01em;margin-bottom:5px;}
+  p{font-size:16px;line-height:1.5;color:var(--muted);}
+  .lead{font-size:19px;color:#c6d1e2;line-height:1.45;max-width:62ch;}
+  .accent{color:var(--accent);}
+  .cyan{color:var(--cyan);}
+  .violet{color:var(--violet);}
+  .green{color:var(--green);}
+  b,strong{color:var(--ink);font-weight:700;}
+
+  code.inl{font-family:var(--mono);font-size:.82em;background:rgba(56,189,248,.10);border:1px solid rgba(56,189,248,.2);color:#9fd8ff;border-radius:6px;padding:1px 6px;}
+
+  ul{list-style:none;}
+  li{font-size:15px;line-height:1.45;color:#c6d1e2;margin-bottom:9px;padding-left:22px;position:relative;}
+  li::before{content:"";position:absolute;left:0;top:8px;width:7px;height:7px;border-radius:2px;background:var(--accent);box-shadow:0 0 8px rgba(249,115,22,.6);}
+  li .sub{color:var(--faint);font-size:13.5px;}
+
+  .grid{display:grid;gap:16px;}
+  .g2{grid-template-columns:1fr 1fr;}
+  .g3{grid-template-columns:repeat(3,1fr);}
+  .g4{grid-template-columns:repeat(4,1fr);}
+  .fill{flex:1;min-height:0;}
+  .mt{margin-top:14px;}
+  .mt8{margin-top:8px;}
+  .center{text-align:center;}
+
+  .card{
+    background:linear-gradient(180deg,var(--panel),var(--panel2));
+    border:1px solid var(--line);border-radius:14px;padding:16px 18px;
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.03);
+    position:relative;
+  }
+  .card p{font-size:13.5px;color:var(--muted);}
+  .card.glow{border-color:rgba(249,115,22,.3);box-shadow:0 0 30px rgba(249,115,22,.08), inset 0 1px 0 rgba(255,255,255,.04);}
+
+  .tag{display:inline-block;font-family:var(--mono);font-size:11.5px;color:#aebbcf;background:rgba(255,255,255,.03);border:1px solid var(--line);border-radius:7px;padding:3px 9px;margin:0 5px 6px 0;}
+
+  /* ---- layered topology ---- */
+  .topo{display:flex;flex-direction:column;gap:0;flex:1;justify-content:center;}
+  .band{display:grid;grid-template-columns:96px 1fr;align-items:center;gap:18px;}
+  .band-label{
+    font-size:10.5px;font-weight:800;letter-spacing:.16em;text-transform:uppercase;
+    color:var(--faint);text-align:right;
+  }
+  .band-row{display:flex;gap:12px;}
+  .conn{height:26px;display:flex;align-items:center;justify-content:center;color:var(--line2);}
+  .conn svg{opacity:.8;}
+  .node{
+    flex:1;background:linear-gradient(180deg,var(--panel),var(--panel2));
+    border:1px solid var(--line);border-radius:12px;padding:11px 14px;
+    display:flex;align-items:center;gap:11px;min-width:0;
+  }
+  .node .ic{width:30px;height:30px;border-radius:8px;display:grid;place-items:center;flex:none;
+    background:rgba(255,255,255,.04);border:1px solid var(--line);}
+  .node .ic svg{width:16px;height:16px;}
+  .node .t{font-weight:700;font-size:14px;line-height:1.1;}
+  .node .s{font-family:var(--mono);font-size:11px;color:var(--faint);}
+  .node.edge{background:linear-gradient(90deg,rgba(249,115,22,.16),rgba(249,115,22,.05));border-color:rgba(249,115,22,.35);}
+  .node.edge .ic{background:rgba(249,115,22,.18);border-color:rgba(249,115,22,.4);color:var(--accent2);}
+  .node.web .ic{color:var(--accent2);}
+  .node.data .ic{color:var(--cyan);}
+  .node.async .ic{color:var(--green);}
+  .node.opt{opacity:.78;border-style:dashed;}
+
+  .callout{
+    border:1px solid rgba(249,115,22,.3);
+    background:linear-gradient(90deg,rgba(249,115,22,.1),rgba(249,115,22,.02));
+    border-left:3px solid var(--accent);border-radius:0 12px 12px 0;
+    padding:13px 16px;color:#f3d9c2;font-size:14.5px;line-height:1.45;
+  }
+  .callout b{color:#fff;}
+
+  /* ---- jotform linkage ---- */
+  .map-head{display:grid;grid-template-columns:1fr 56px 1fr;gap:14px;margin-bottom:10px;}
+  .map-head .h{font-size:12px;font-weight:800;letter-spacing:.12em;text-transform:uppercase;text-align:center;padding:8px;border-radius:10px;}
+  .map-head .prod{color:#9fd8ff;background:rgba(56,189,248,.1);border:1px solid rgba(56,189,248,.25);}
+  .map-head .repl{color:var(--accent2);background:rgba(249,115,22,.1);border:1px solid rgba(249,115,22,.28);}
+  .maprow{display:grid;grid-template-columns:1fr 56px 1fr;gap:14px;align-items:center;margin-bottom:8px;}
+  .maprow .side{
+    background:linear-gradient(180deg,var(--panel),var(--panel2));border:1px solid var(--line);
+    border-radius:10px;padding:9px 13px;font-size:13px;line-height:1.3;color:#c6d1e2;
+  }
+  .maprow .side b{font-size:13px;}
+  .maprow .side.left{border-left:2px solid rgba(56,189,248,.5);}
+  .maprow .side.right{border-left:2px solid rgba(249,115,22,.6);}
+  .maprow .side .mono{font-family:var(--mono);font-size:11.5px;color:#9fd8ff;}
+  .maprow .side.right .mono{color:#ffc98c;}
+  .arrowcell{display:grid;place-items:center;color:var(--accent);}
+
+  /* ---- pipeline ---- */
+  .pipe{display:flex;align-items:stretch;gap:0;}
+  .step{
+    flex:1;background:linear-gradient(180deg,var(--panel),var(--panel2));border:1px solid var(--line);
+    border-radius:12px;padding:14px;position:relative;
+  }
+  .step .n{position:absolute;top:-11px;left:13px;width:24px;height:24px;border-radius:50%;
+    background:var(--accent);color:#1a0c02;font-weight:800;font-size:13px;display:grid;place-items:center;
+    box-shadow:0 0 16px rgba(249,115,22,.5);}
+  .step .t{font-weight:700;font-size:14.5px;margin-bottom:3px;margin-top:4px;}
+  .step .d{font-size:12.5px;color:var(--muted);line-height:1.35;}
+  .step.async{border-color:rgba(52,211,153,.3);}
+  .step.async .n{background:var(--green);color:#03150e;box-shadow:0 0 16px rgba(52,211,153,.4);}
+  .parrow{display:grid;place-items:center;color:var(--line2);width:30px;flex:none;}
+
+  /* ---- trace waterfall ---- */
+  .wf{display:flex;flex-direction:column;gap:9px;}
+  .wfrow{display:grid;grid-template-columns:300px 1fr;align-items:center;gap:14px;}
+  .wflabel{font-size:13px;color:#c6d1e2;display:flex;align-items:center;gap:8px;}
+  .wflabel .knd{font-family:var(--mono);font-size:9.5px;font-weight:700;padding:2px 6px;border-radius:5px;letter-spacing:.04em;}
+  .knd.server{background:rgba(249,115,22,.18);color:var(--accent2);}
+  .knd.consumer{background:rgba(56,189,248,.16);color:var(--cyan);}
+  .knd.client{background:rgba(167,139,250,.18);color:var(--violet);}
+  .knd.recv{background:rgba(52,211,153,.16);color:var(--green);}
+  .wflabel .nm{font-family:var(--mono);font-size:12px;color:#c6d1e2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .wftrack{position:relative;height:22px;background:rgba(255,255,255,.025);border-radius:6px;border:1px solid var(--line);}
+  .wfbar{position:absolute;top:3px;bottom:3px;border-radius:5px;}
+  .wfbar.server{background:linear-gradient(90deg,#f97316,#fbbf24);box-shadow:0 0 14px rgba(249,115,22,.4);}
+  .wfbar.consumer{background:linear-gradient(90deg,#0ea5e9,#38bdf8);}
+  .wfbar.client{background:linear-gradient(90deg,#8b5cf6,#a78bfa);}
+  .wfbar.recv{background:repeating-linear-gradient(45deg,#34d399,#34d399 6px,#1f7a5b 6px,#1f7a5b 12px);}
+
+  /* ---- obs layers ---- */
+  .layer{display:flex;align-items:center;gap:16px;padding:13px 16px;border-radius:12px;
+    background:linear-gradient(180deg,var(--panel),var(--panel2));border:1px solid var(--line);}
+  .layer .lic{width:38px;height:38px;border-radius:10px;display:grid;place-items:center;flex:none;}
+  .layer .lic svg{width:19px;height:19px;}
+  .layer .body{flex:1;}
+  .layer .name{font-weight:700;font-size:15px;}
+  .layer .desc{font-size:12.5px;color:var(--muted);}
+  .layer .knob{font-family:var(--mono);font-size:11px;color:#9fd8ff;background:rgba(56,189,248,.08);border:1px solid rgba(56,189,248,.18);padding:4px 9px;border-radius:7px;white-space:nowrap;}
+  .layer .cost{font-size:11px;font-weight:700;text-align:center;width:92px;flex:none;}
+  .cost.zero{color:var(--green);}
+  .cost.near{color:var(--amber);}
+
+  /* ---- slo cards ---- */
+  .slo{background:linear-gradient(180deg,var(--panel),var(--panel2));border:1px solid var(--line);border-radius:14px;padding:18px 16px;text-align:center;position:relative;overflow:hidden;}
+  .slo::after{content:"";position:absolute;inset:0;background:radial-gradient(120px 80px at 50% 0%,rgba(249,115,22,.14),transparent 70%);}
+  .slo .v{font-size:38px;font-weight:800;letter-spacing:-.03em;
+    background:linear-gradient(90deg,#fbbf24,#f97316);-webkit-background-clip:text;background-clip:text;color:transparent;position:relative;}
+  .slo .k{font-size:13px;font-weight:700;margin-top:4px;position:relative;}
+  .slo .s{font-size:11.5px;color:var(--faint);position:relative;}
+
+  table{width:100%;border-collapse:collapse;font-size:13.5px;}
+  th{text-align:left;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--faint);padding:7px 12px;border-bottom:1px solid var(--line2);font-weight:800;}
+  td{padding:8px 12px;border-bottom:1px solid var(--line);color:#c6d1e2;vertical-align:top;}
+  tr:last-child td{border-bottom:none;}
+  td .mono{font-family:var(--mono);font-size:11.5px;color:#ffc98c;}
+  .s-ok{color:var(--green);font-weight:700;}
+  .s-warn{color:var(--amber);font-weight:700;}
+  .s-bad{color:var(--red);font-weight:700;}
+
+  pre{font-family:var(--mono);font-size:12.5px;line-height:1.5;color:#cdd8e8;
+    background:#080c13;border:1px solid var(--line);border-radius:12px;padding:14px 16px;overflow:auto;}
+  pre .c{color:#5d6c83;} pre .o{color:#fbbf24;} pre .g{color:#34d399;} pre .b{color:#38bdf8;}
+
+  .two{display:grid;grid-template-columns:1.05fr .95fr;gap:26px;align-items:start;}
+
+  /* chrome inside stage */
+  .chrome{position:absolute;left:0;right:0;bottom:0;height:42px;display:flex;align-items:center;justify-content:space-between;
+    padding:0 22px;border-top:1px solid var(--line);background:rgba(8,12,19,.6);font-size:11.5px;color:var(--faint);}
+  .chrome .l{display:flex;align-items:center;gap:9px;}
+  .chrome .dot{width:6px;height:6px;border-radius:50%;background:var(--accent);box-shadow:0 0 8px var(--accent);}
+  .progress{position:absolute;top:0;left:0;height:2px;background:linear-gradient(90deg,#f97316,#fbbf24);transition:width .35s ease;box-shadow:0 0 10px rgba(249,115,22,.6);}
+
+  .title-slide{justify-content:center;}
+  .brand{display:flex;align-items:center;gap:14px;margin-bottom:24px;}
+  .logo{width:50px;height:50px;border-radius:13px;background:linear-gradient(135deg,#f97316,#fbbf24);display:grid;place-items:center;color:#1a0c02;font-weight:900;font-size:24px;box-shadow:0 8px 28px rgba(249,115,22,.5);}
+  .metarow{display:flex;gap:40px;margin-top:30px;}
+  .metarow .k{font-size:11px;text-transform:uppercase;letter-spacing:.12em;color:var(--faint);margin-bottom:5px;}
+  .metarow .v{font-size:15px;font-weight:600;color:#dbe3ef;}
+
+  /* nav */
+  .nav{position:fixed;bottom:18px;right:20px;display:flex;gap:8px;z-index:30;}
+  .nav button{width:40px;height:40px;border-radius:11px;border:1px solid #243144;background:rgba(18,25,37,.85);color:#c6d1e2;font-size:18px;cursor:pointer;backdrop-filter:blur(8px);transition:.15s;}
+  .nav button:hover{border-color:var(--accent);color:var(--accent);box-shadow:0 0 16px rgba(249,115,22,.3);}
+  .hint{position:fixed;bottom:24px;left:24px;font-size:11px;color:var(--faint);z-index:30;}
+</style>
+</head>
+<body>
+<div id="stage">
+
+  <!-- 1 TITLE -->
+  <section class="slide active title-slide">
+    <div class="brand">
+      <div class="logo">R</div>
+      <span class="kicker" style="margin:0;">Architecture &amp; SRE / SLO Review</span>
+    </div>
+    <h1>ReliableForm</h1>
+    <p class="lead mt">A JotForm-faithful runtime, rebuilt on one host as a controlled lab for our SLI/SLO stack — <span class="accent">production shape, measurable overhead, breakable on demand.</span></p>
+    <div class="metarow">
+      <div><div class="k">Topology</div><div class="v">LB · 2× web · async workers · queue · DB</div></div>
+      <div><div class="k">Fidelity</div><div class="v">FPM · gearmand · MySQL sessions · React hybrid</div></div>
+      <div><div class="k">Focus</div><div class="v">Observability · SLIs · SLOs · Failure modes</div></div>
+    </div>
+  </section>
+
+  <!-- 2 ARCHITECTURE -->
+  <section class="slide">
+    <div class="kicker">Architecture</div>
+    <h2>One host, real production <span class="accent">shape</span></h2>
+    <div class="topo fill">
+      <div class="band">
+        <div class="band-label">Client</div>
+        <div class="band-row"><div class="node" style="flex:0 0 240px;">
+          <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 20h8M12 17v3"/></svg></div>
+          <div><div class="t">Browser</div><div class="s">:8080</div></div>
+        </div></div>
+      </div>
+      <div class="band"><div></div><div class="conn"><svg width="14" height="22"><path d="M7 0v22M2 16l5 6 5-6" stroke="currentColor" stroke-width="1.5" fill="none"/></svg></div></div>
+      <div class="band">
+        <div class="band-label">Edge</div>
+        <div class="band-row"><div class="node edge">
+          <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2 3 6v6c0 5 4 8 9 10 5-2 9-5 9-10V6z"/></svg></div>
+          <div><div class="t">Nginx — load balancer / reverse proxy</div><div class="s">least_conn · max_fails ejection · /status,/api,/build split</div></div>
+        </div></div>
+      </div>
+      <div class="band"><div></div><div class="conn"><svg width="14" height="22"><path d="M7 0v22M2 16l5 6 5-6" stroke="currentColor" stroke-width="1.5" fill="none"/></svg></div></div>
+      <div class="band">
+        <div class="band-label">Web tier</div>
+        <div class="band-row">
+          <div class="node web"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1018 0 9 9 0 10-18 0M3 12h18M12 3a14 14 0 010 18M12 3a14 14 0 000 18"/></svg></div><div><div class="t">status</div><div class="s">Node :9301</div></div></div>
+          <div class="node web"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="6" rx="1"/><rect x="3" y="14" width="18" height="6" rx="1"/><path d="M7 7h.01M7 17h.01"/></svg></div><div><div class="t">web1</div><div class="s">PHP-FPM :9001</div></div></div>
+          <div class="node web"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="6" rx="1"/><rect x="3" y="14" width="18" height="6" rx="1"/><path d="M7 7h.01M7 17h.01"/></svg></div><div><div class="t">web2</div><div class="s">PHP-FPM :9002</div></div></div>
+        </div>
+      </div>
+      <div class="band"><div></div><div class="conn"><svg width="14" height="22"><path d="M7 0v22M2 16l5 6 5-6" stroke="currentColor" stroke-width="1.5" fill="none"/></svg></div></div>
+      <div class="band">
+        <div class="band-label">State</div>
+        <div class="band-row">
+          <div class="node data"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg></div><div><div class="t">MySQL</div><div class="s">:3306 · source of truth · sessions</div></div></div>
+          <div class="node data"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6l9-4 9 4-9 4z"/><path d="M3 12l9 4 9-4M3 18l9 4 9-4"/></svg></div><div><div class="t">Redis</div><div class="s">:6379 · cache · rate-limits · heartbeats</div></div></div>
+          <div class="node data opt"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 9h10M7 13h6"/></svg></div><div><div class="t">gearmand</div><div class="s">:4730 · optional</div></div></div>
+        </div>
+      </div>
+      <div class="band"><div></div><div class="conn"><svg width="14" height="22"><path d="M7 0v22M2 16l5 6 5-6" stroke="currentColor" stroke-width="1.5" fill="none"/></svg></div></div>
+      <div class="band">
+        <div class="band-label">Async</div>
+        <div class="band-row">
+          <div class="node async"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/></svg></div><div><div class="t">pdf</div><div class="s">PHP CLI</div></div></div>
+          <div class="node async"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 7l9 6 9-6"/></svg></div><div><div class="t">email</div><div class="s">PHP CLI</div></div></div>
+          <div class="node async"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 12a8 8 0 018-8M20 12a8 8 0 01-8 8M12 4l3 3-3 3M12 20l-3-3 3-3"/></svg></div><div><div class="t">webhook</div><div class="s">PHP CLI · retries</div></div></div>
+          <div class="node async opt"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v6M5 9l4 3M19 9l-4 3M7 21h10l-5-9z"/></svg></div><div><div class="t">otel shipper</div><div class="s">optional sidecar</div></div></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 3 JOTFORM LINKAGE -->
+  <section class="slide">
+    <div class="kicker">Link to JotForm</div>
+    <h2>Same runtime <span class="accent">shape</span> as production — component for component</h2>
+    <div class="map-head">
+      <div class="h prod">JotForm — production reference</div>
+      <div></div>
+      <div class="h repl">ReliableForm — replica</div>
+    </div>
+    <div class="fill">
+      <div class="maprow"><div class="side left">Edge LB → web fleet</div><div class="arrowcell">→</div><div class="side right">Nginx <span class="mono">least_conn</span> → web1/web2, max_fails ejection</div></div>
+      <div class="maprow"><div class="side left"><b>PHP-FPM</b> web pools</div><div class="arrowcell">→</div><div class="side right">2 FPM masters + FastCGI <span class="mono">(WEB_RUNTIME=fpm)</span></div></div>
+      <div class="maprow"><div class="side left"><b>gearmand</b> + CLI Gearman workers</div><div class="arrowcell">→</div><div class="side right"><span class="mono">GearmanLite.php</span> + CLI workers, Redis fallback</div></div>
+      <div class="maprow"><div class="side left"><b>MySQL sessions</b>; Redis = cache only</div><div class="arrowcell">→</div><div class="side right"><span class="mono">SESSION_DRIVER=mysql</span>; Redis cache/limits</div></div>
+      <div class="maprow"><div class="side left"><b>FrontendLoader</b> + router-bridge SPAs</div><div class="arrowcell">→</div><div class="side right"><span class="mono">FrontendLoader.php</span> → <span class="mono">window.__rfrouter</span></div></div>
+      <div class="maprow"><div class="side left"><b>JF-Trace-Parent-ID</b> propagation</div><div class="arrowcell">→</div><div class="side right">W3C <span class="mono">traceparent</span> adopted by <span class="mono">Trace.php</span></div></div>
+    </div>
+    <div class="callout">Every layer mirrors a real component — with a <b>fallback</b> so the stack still boots anywhere. Validated here, the SLIs transfer to prod.</div>
+  </section>
+
+  <!-- 4 FRONTEND FIDELITY -->
+  <section class="slide">
+    <div class="kicker">Link to JotForm · frontend</div>
+    <h2>Hybrid / strangler frontend — JotForm's exact pattern</h2>
+    <div class="grid g3 mt">
+      <div class="card"><h3 class="cyan">Public forms → PHP</h3><p>Highest-traffic, lowest-trust surface stays server-rendered &amp; cacheable.</p></div>
+      <div class="card glow"><h3 class="accent">App surfaces → React SPA</h3><p>Dashboard &amp; builder bootstrapped by a PHP shell injecting <code class="inl">window.__rfrouter</code>.</p></div>
+      <div class="card"><h3 class="violet">Telemetry → every page</h3><p>Built bundle injected globally: RUM, JS-error capture, trace propagation.</p></div>
+    </div>
+    <div class="two mt">
+      <div class="card">
+        <h3>Shared libs — pnpm · Rspack · TypeScript</h3>
+        <table class="mt8">
+          <tr><td class="mono">@rf/router-bridge</td><td>reads <code class="inl">window.__rfrouter</code> (mirrors JotForm)</td></tr>
+          <tr><td class="mono">@rf/request-layer</td><td>axios + CSRF + typed <code class="inl">ApiError</code></td></tr>
+          <tr><td class="mono">@rf/telemetry</td><td>web-vitals · trace headers · error beacons</td></tr>
+        </table>
+      </div>
+      <div class="card">
+        <h3>Additive by design</h3>
+        <p>The PHP app runs standalone. Telemetry injects only when <code class="inl">asset-manifest.json</code> exists — giving the browser SRE layer a <b>true zero-cost "off"</b> state, like every other layer.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 5 SUBMISSION LIFECYCLE -->
+  <section class="slide">
+    <div class="kicker">Request path</div>
+    <h2>Submission lifecycle — <span class="accent">durable first, async after</span></h2>
+    <div class="pipe mt" style="margin-top:24px;">
+      <div class="step"><div class="n">1</div><div class="t">Ingress</div><div class="d">Nginx → web1 | web2</div></div>
+      <div class="parrow">▶</div>
+      <div class="step"><div class="n">2</div><div class="t">Validate</div><div class="d">required · type · publish/limit · rate-limit</div></div>
+      <div class="parrow">▶</div>
+      <div class="step"><div class="n">3</div><div class="t">MySQL txn</div><div class="d">submission + pending pdf/email/webhook rows</div></div>
+      <div class="parrow">▶</div>
+      <div class="step"><div class="n">4</div><div class="t">Commit → enqueue</div><div class="d">push jobs only after commit</div></div>
+      <div class="parrow">▶</div>
+      <div class="step async"><div class="n">5</div><div class="t">Thanks (302)</div><div class="d">user never waits</div></div>
+    </div>
+    <div class="grid g2 mt" style="margin-top:26px;">
+      <div class="card"><h3>Why durable-first</h3><p>One transaction writes the submission + all <code class="inl">pending</code> job rows; enqueue happens <b>only after commit</b>. A worker can never see a job before its row exists.</p></div>
+      <div class="card"><h3>Graceful degradation</h3><p>If post-commit Redis work fails, the submission still succeeds — flash a warning, bump <code class="inl">web.submission.redis_degraded</code>. The user never eats an infra failure.</p></div>
+    </div>
+  </section>
+
+  <!-- 6 ASYNC PIPELINE -->
+  <section class="slide">
+    <div class="kicker">Async pipeline</div>
+    <h2>Workers · retries · dead-letters · driver fallback</h2>
+    <div class="two mt">
+      <div>
+        <ul>
+          <li><b>Long-running PHP CLI loops</b><span class="sub"> — pdf / email / webhook, shared <code class="inl">WorkerLoop</code> over BLPOP or GRAB_JOB.</span></li>
+          <li><b>Idempotent</b><span class="sub"> — re-running a <code class="inl">done</code> job is a no-op; <code class="inl">submission_id</code> is UNIQUE.</span></li>
+          <li><b>Retry with backoff</b><span class="sub"> — 3 attempts, <code class="inl">min(2^n,8)</code>s, heartbeat kept alive through sleeps.</span></li>
+          <li><b>Dead-letter</b><span class="sub"> — after 3 fails → <code class="inl">queue:dead</code> (always Redis, always inspectable).</span></li>
+          <li><b>Graceful shutdown</b><span class="sub"> — SIGTERM finishes the current job, exits 0.</span></li>
+        </ul>
+        <div class="mt8">
+          <span class="tag">queue:pdf → rf_pdf</span>
+          <span class="tag">queue:email → rf_email</span>
+          <span class="tag">queue:webhook → rf_webhook</span>
+        </div>
+      </div>
+      <div class="card glow">
+        <h3 class="accent">gearmand ↔ redis fallback</h3>
+        <p>Kill gearmand → submissions still commit; <code class="inl">Queue::push()</code> falls back to Redis lists at push time (<code class="inl">queue.driver_fallback</code>). Workers drain the fallback via BLPOP until gearmand returns, then re-register.</p>
+        <div class="callout mt">Nothing stuck, nothing lost — <b>no user-facing degradation.</b></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 7 OBSERVABILITY LAYERS -->
+  <section class="slide">
+    <div class="kicker">Observability</div>
+    <h2>Three layers — <span class="accent">each independently toggleable</span></h2>
+    <p class="mt8" style="margin-bottom:14px;">That switchability is the experiment apparatus: it lets us isolate the cost of every layer.</p>
+    <div class="grid fill" style="gap:11px;align-content:center;">
+      <div class="layer"><div class="lic" style="background:rgba(249,115,22,.14);color:var(--accent2);"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 17l5-6 4 4 5-7 4 5"/></svg></div>
+        <div class="body"><div class="name">StatsD metrics</div><div class="desc">UDP counters/timings, <code class="inl">reliableform.*</code> — request, job, queue, client web-vitals</div></div>
+        <div class="knob">always on (UDP)</div><div class="cost near">~zero</div></div>
+      <div class="layer"><div class="lic" style="background:rgba(56,189,248,.14);color:var(--cyan);"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16v4H4zM4 12h16v4H4zM4 20h10"/></svg></div>
+        <div class="body"><div class="name">Structured log (JSONL)</div><div class="desc">one line / request / job, carries <code class="inl">trace_id</code> — joins logs &amp; spans collector-free</div></div>
+        <div class="knob">APPLOG_ENABLED=0</div><div class="cost zero">zero</div></div>
+      <div class="layer"><div class="lic" style="background:rgba(167,139,250,.14);color:var(--violet);"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="12" r="2.5"/><circle cx="6" cy="18" r="2.5"/><path d="M8.5 6H14M8 17l8-4"/></svg></div>
+        <div class="body"><div class="name">OTel traces</div><div class="desc">SERVER / CONSUMER / CLIENT spans → local spool → sidecar ships to collector</div></div>
+        <div class="knob">unset OTLP endpoint</div><div class="cost zero">zero</div></div>
+      <div class="layer"><div class="lic" style="background:rgba(52,211,153,.14);color:var(--green);"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8"/></svg></div>
+        <div class="body"><div class="name">Browser RUM / errors</div><div class="desc">Core Web Vitals + JS errors → <code class="inl">/v1/rum</code>, <code class="inl">/v1/clientlog</code></div></div>
+        <div class="knob">no manifest built</div><div class="cost zero">zero</div></div>
+    </div>
+    <div class="callout">Apps never export over HTTP themselves — only the <b>otel sidecar</b> talks to a collector, so exporter cost never pollutes request-path latency.</div>
+  </section>
+
+  <!-- 8 TRACE WATERFALL -->
+  <section class="slide">
+    <div class="kicker">Trace model</div>
+    <h2>One W3C trace — <span class="accent">browser → workers → receiver</span>, no SDK</h2>
+    <div class="card fill" style="display:flex;flex-direction:column;justify-content:center;">
+      <div class="wf">
+        <div class="wfrow"><div class="wflabel"><span class="knd server">SERVER</span><span class="nm">POST /v1/forms/{id}/submissions</span></div><div class="wftrack"><div class="wfbar server" style="left:0;width:100%;"></div></div></div>
+        <div class="wfrow"><div class="wflabel"><span class="knd consumer">CONSUMER</span><span class="nm">queue:pdf process</span></div><div class="wftrack"><div class="wfbar consumer" style="left:22%;width:13%;"></div></div></div>
+        <div class="wfrow"><div class="wflabel"><span class="knd consumer">CONSUMER</span><span class="nm">queue:email process</span></div><div class="wftrack"><div class="wfbar consumer" style="left:24%;width:16%;"></div></div></div>
+        <div class="wfrow"><div class="wflabel"><span class="knd consumer">CONSUMER</span><span class="nm">queue:webhook process</span></div><div class="wftrack"><div class="wfbar consumer" style="left:27%;width:34%;"></div></div></div>
+        <div class="wfrow"><div class="wflabel" style="padding-left:18px;"><span class="knd client">CLIENT</span><span class="nm">webhook deliver (per attempt)</span></div><div class="wftrack"><div class="wfbar client" style="left:31%;width:18%;"></div></div></div>
+        <div class="wfrow"><div class="wflabel" style="padding-left:36px;"><span class="knd recv">RECEIVER</span><span class="nm">traceparent → receiver spans</span></div><div class="wftrack"><div class="wfbar recv" style="left:40%;width:14%;"></div></div></div>
+      </div>
+    </div>
+    <div class="grid g3 mt">
+      <div class="card"><p>Incoming <code class="inl">traceparent</code> adopted; every response carries <code class="inl">X-Trace-Id</code>.</p></div>
+      <div class="card"><p><code class="inl">Queue::push()</code> embeds context → worker resumes the same trace.</p></div>
+      <div class="card"><p>Webhook POST forwards <code class="inl">traceparent</code> — the trace <b>leaves the stack.</b></p></div>
+    </div>
+  </section>
+
+  <!-- 9 SLIs -->
+  <section class="slide">
+    <div class="kicker">SLIs</div>
+    <h2>What we measure — and where it comes from</h2>
+    <div class="card fill" style="padding:6px 10px;">
+      <table>
+        <thead><tr><th>SLI</th><th>Service</th><th>Source</th></tr></thead>
+        <tbody>
+          <tr><td>Availability (non-5xx)</td><td>web / API</td><td>nginx <span class="mono">$status</span> · <span class="mono">web.status.* / api.status.*</span></td></tr>
+          <tr><td>Request latency</td><td>web / API</td><td><span class="mono">web.request_ms</span> · nginx <span class="mono">rt=</span> p50/p90/p99</td></tr>
+          <tr><td>Job success rate</td><td>workers</td><td><span class="mono">worker.pdf.done</span> vs <span class="mono">.failed</span> (+ email/webhook)</td></tr>
+          <tr><td>Worker freshness</td><td>workers</td><td><span class="mono">heartbeat:worker-*</span> absent ⇒ down · queue depth</td></tr>
+          <tr><td>Webhook delivery success</td><td>worker-webhook</td><td><span class="mono">worker.webhook.delivered</span> vs <span class="mono">.failed</span></td></tr>
+          <tr><td>E2E submission → delivered</td><td>cross-service</td><td>SERVER span → CLIENT span, joined by <span class="mono">trace_id</span></td></tr>
+          <tr><td>Telemetry pipeline health</td><td>otel sidecar</td><td><span class="mono">otel.spans_exported</span> vs <span class="mono">.spans_dropped</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="callout">Design choice for review: prefer LB-side <span style="color:#fff;font-family:var(--mono);font-size:.85em;">$status</span> for availability — it captures nginx-generated 502s the app never saw.</div>
+  </section>
+
+  <!-- 10 SLOs -->
+  <section class="slide">
+    <div class="kicker">SLOs</div>
+    <h2>Initial targets — frontend &amp; backend</h2>
+    <div class="grid g4 mt">
+      <div class="slo"><div class="v">&lt;2.5s</div><div class="k">LCP p75</div><div class="s">Largest Contentful Paint</div></div>
+      <div class="slo"><div class="v">&lt;200ms</div><div class="k">INP p75</div><div class="s">Interaction to Next Paint</div></div>
+      <div class="slo"><div class="v">&lt;0.1</div><div class="k">CLS p75</div><div class="s">Cumulative Layout Shift</div></div>
+      <div class="slo"><div class="v">&lt;800ms</div><div class="k">TTFB p75</div><div class="s">Time To First Byte</div></div>
+    </div>
+    <div class="grid g3 mt" style="margin-top:18px;">
+      <div class="slo"><div class="v">&lt;1%</div><div class="k">JS error rate</div><div class="s">of sessions</div></div>
+      <div class="slo"><div class="v">&gt;99%</div><div class="k">Submit success</div><div class="s">public form, browser-observed</div></div>
+      <div class="slo"><div class="v">&gt;99.5%</div><div class="k">Builder save success</div><div class="s">authenticated surface</div></div>
+    </div>
+    <p class="mt" style="margin-top:18px;">Browser SLIs come from the layer that's blind to server metrics; browser→backend traces join via <code class="inl">traceparent</code>, so a slow client API call follows straight into the server span.</p>
+  </section>
+
+  <!-- 11 OVERHEAD A/B -->
+  <section class="slide">
+    <div class="kicker">The research goal</div>
+    <h2>Overhead A/B — <span class="accent">what does instrumentation cost?</span></h2>
+    <div class="two mt">
+      <div>
+        <p>Loadgen drives a realistic mix and reports <b>server-side</b> latency (nginx <code class="inl">rt=</code> percentiles over the run window) — client fork overhead never pollutes the number.</p>
+        <table class="mt">
+          <thead><tr><th>Config</th><th>.env</th></tr></thead>
+          <tbody>
+            <tr><td><b>off</b> (baseline)</td><td>applog 0, otel unset</td></tr>
+            <tr><td>applog</td><td>applog 1, otel unset</td></tr>
+            <tr><td>otel-spool</td><td>+ endpoint, <i>no collector</i></td></tr>
+            <tr><td>otel-full</td><td>+ collector running</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="card glow">
+        <h3 class="accent">Protocol</h3>
+        <ul style="margin-top:6px;">
+          <li>Quiet machine, identical duration/concurrency.</li>
+          <li>1 warm-up (discarded) + 3 measured runs / config.</li>
+          <li>Sample web/otel pid CPU + RSS mid-run.</li>
+          <li>Compare <b>medians</b>, not single runs.</li>
+        </ul>
+        <pre class="mt8">delta = median(p50 cfg) − median(p50 off)
+<span class="c"># also watch rps — overhead can</span>
+<span class="c"># show up as throughput loss</span></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- 12 FAILURE DRILLS -->
+  <section class="slide">
+    <div class="kicker">Chaos · failure modes</div>
+    <h2>Drills the playground was built to run</h2>
+    <div class="card fill" style="padding:6px 10px;">
+      <table>
+        <thead><tr><th>Drill</th><th>Command</th><th>Expected behavior</th></tr></thead>
+        <tbody>
+          <tr><td>Web instance dies</td><td><span class="mono">launch.sh kill web1</span></td><td class="s-ok">LB serves via web2; /status flags it; max_fails ejects</td></tr>
+          <tr><td>Redis outage</td><td><span class="mono">redis-cli shutdown</span></td><td class="s-warn">cache/queues degrade; healthz→503; mysql sessions survive; workers reconnect</td></tr>
+          <tr><td>Worker dies</td><td><span class="mono">launch.sh kill worker-pdf</span></td><td class="s-warn">PDFs queue up; heartbeat vanishes; restart drains backlog</td></tr>
+          <tr><td>Webhook receiver fails</td><td><span class="mono">webhook-sink ?fail=1</span></td><td class="s-bad">3 attempts → dead-letter <span class="mono">queue:dead</span> → row <span class="mono">failed</span></td></tr>
+          <tr><td>gearmand outage</td><td><span class="mono">launch.sh kill gearmand</span></td><td class="s-ok">push falls back to Redis; nothing lost; auto re-registers</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="callout">Each drill is observable through the <b>same three layers</b> — so we validate the SLIs actually <i>catch</i> the failure, not just that the failure happens.</div>
+  </section>
+
+  <!-- 13 HEALTH MODEL -->
+  <section class="slide">
+    <div class="kicker">Health model</div>
+    <h2>Liveness contract + single pane of glass</h2>
+    <div class="grid g2 mt">
+      <div class="card"><h3 class="cyan">Every HTTP service: <code class="inl">/healthz</code></h3><p>Checks its real deps (db, redis) → 200/503. FPM mode probes per-pool through nginx: <code class="inl">/__pool/web1/healthz</code> + <code class="inl">/fpm-status</code> (active procs, listen queue — first-class SLI surfaces).</p></div>
+      <div class="card"><h3 class="green">Workers: heartbeat, not HTTP</h3><p><code class="inl">SETEX heartbeat:&lt;instance&gt; 15s</code> every loop. <b>Absent key ⇒ down.</b> The status service calls a worker dead when the key expires.</p></div>
+    </div>
+    <div class="card glow mt">
+      <h3 class="accent">Node status dashboard — <code class="inl">/status</code>, <code class="inl">/api/status</code></h3>
+      <p>One screen probes LB · web1 · web2 · MySQL · Redis · gearmand · queue depths · heartbeats · usage stats, every 5s. It's what makes load balancing and failure <b>visible</b> during the demo.</p>
+    </div>
+  </section>
+
+  <!-- 14 TAKEAWAYS -->
+  <section class="slide">
+    <div class="kicker">Takeaways</div>
+    <h2>Why this de-risks the production rollout</h2>
+    <div class="grid g3 mt">
+      <div class="card glow"><h3 class="accent">1 · Faithful</h3><p>Same runtime shape as JotForm — FPM, gearman, MySQL sessions, hybrid React frontend, W3C trace propagation. SLIs validated here transfer.</p></div>
+      <div class="card glow"><h3 class="accent">2 · Measurable</h3><p>Every observability layer toggles independently, so we quantify overhead before it lands in prod — with a repeatable A/B ledger.</p></div>
+      <div class="card glow"><h3 class="accent">3 · Breakable</h3><p>Induced failures on demand prove the SLIs actually fire under outages — not just that the system has metrics.</p></div>
+    </div>
+    <div class="callout mt" style="margin-top:22px;">ReliableForm answers "<i>is this SLI correct, what does it cost, does it fire under failure?</i>" <b>before</b> the answer matters on production JotForm.</div>
+    <p class="lead" style="margin-top:22px;">Thank you — questions?</p>
+  </section>
+
+  <!-- chrome -->
+  <div class="progress" id="progress"></div>
+  <div class="chrome">
+    <div class="l"><span class="dot"></span><b style="color:#dbe3ef;">ReliableForm</b> · Architecture &amp; SRE/SLO</div>
+    <div id="counter">1 / 14</div>
+  </div>
+</div>
+
+<div class="nav">
+  <button id="prev">‹</button>
+  <button id="next">›</button>
+</div>
+<div class="hint">← → / Space · F fullscreen</div>
+
+<script>
+  const stage = document.getElementById('stage');
+  function fit(){
+    const s = Math.min(window.innerWidth / 1280, window.innerHeight / 720);
+    stage.style.transform = `translate(-50%,-50%) scale(${s})`;
+  }
+  window.addEventListener('resize', fit); fit();
+
+  const slides = Array.from(document.querySelectorAll('.slide'));
+  let i = 0;
+  const counter = document.getElementById('counter');
+  const progress = document.getElementById('progress');
+  function show(n){
+    i = Math.max(0, Math.min(slides.length - 1, n));
+    slides.forEach((s, idx) => s.classList.toggle('active', idx === i));
+    counter.textContent = (i + 1) + ' / ' + slides.length;
+    progress.style.width = (i / (slides.length - 1) * 100) + '%';
+    location.hash = i + 1;
+  }
+  const next = () => show(i + 1), prev = () => show(i - 1);
+  document.getElementById('next').onclick = next;
+  document.getElementById('prev').onclick = prev;
+  document.addEventListener('keydown', e => {
+    if(['ArrowRight','PageDown',' '].includes(e.key)){ e.preventDefault(); next(); }
+    else if(['ArrowLeft','PageUp'].includes(e.key)){ e.preventDefault(); prev(); }
+    else if(e.key === 'Home') show(0);
+    else if(e.key === 'End') show(slides.length - 1);
+    else if(e.key === 'f' || e.key === 'F'){
+      if(!document.fullscreenElement) document.documentElement.requestFullscreen();
+      else document.exitFullscreen();
+    }
+  });
+  let tx = 0;
+  document.addEventListener('touchstart', e => tx = e.changedTouches[0].clientX);
+  document.addEventListener('touchend', e => {
+    const dx = e.changedTouches[0].clientX - tx;
+    if(Math.abs(dx) > 50) dx < 0 ? next() : prev();
+  });
+  const start = parseInt((location.hash || '#1').slice(1), 10);
+  show(isNaN(start) ? 0 : start - 1);
+</script>
+</body>
+</html>
