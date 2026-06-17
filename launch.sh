@@ -39,17 +39,22 @@ ALL_SERVICES="$APP_SERVICES nginx gearmand"
 CMD=""
 LOG_TARGET=""
 KILL_TARGET=""
+FULL_TARGET=""
+STOP_INFRA=0
 usage() {
-    echo "usage: bash launch.sh [start|stop|restart|status|logs <name>|kill <name>] [--yes|-y]"
+    echo "usage: bash launch.sh [start|stop|restart|status|logs <name>|kill <name>|full <up|down>] [--yes|-y] [--infra]"
     echo "       service names: web1 web2 status worker-pdf worker-email worker-webhook nginx gearmand"
     echo "       kill = chaos-kill one service (whole process tree); start brings it back"
+    echo "       stop --infra = also stop the podman backing services (MySQL/Redis/gearmand)"
+    echo "       full up|down = run the WHOLE stack in podman (config/podman/compose.full.yaml)"
 }
 for arg in "$@"; do
     case "$arg" in
         -y|--yes) ASSUME_YES=1; export ASSUME_YES; continue ;;
+        --infra)  STOP_INFRA=1; continue ;;
     esac
-    # Targets bind first: `kill status` / `logs status` must read 'status' as
-    # the service name, not as a second command.
+    # Targets bind first: `kill status` / `logs status` / `full up` must read
+    # the second word as the target, not as a second command.
     if [ "$CMD" = "logs" ] && [ -z "$LOG_TARGET" ]; then
         LOG_TARGET="$arg"
         continue
@@ -58,8 +63,12 @@ for arg in "$@"; do
         KILL_TARGET="$arg"
         continue
     fi
+    if [ "$CMD" = "full" ] && [ -z "$FULL_TARGET" ]; then
+        FULL_TARGET="$arg"
+        continue
+    fi
     case "$arg" in
-        start|stop|restart|status|logs|kill)
+        start|stop|restart|status|logs|kill|full)
             if [ -n "$CMD" ]; then err "only one command allowed (got '$CMD' and '$arg')"; usage; exit 1; fi
             CMD="$arg"
             ;;
@@ -89,6 +98,14 @@ WEB_RUNTIME_CFG="${WEB_RUNTIME:-}"
 [ -z "$WEB_RUNTIME_CFG" ] && WEB_RUNTIME_CFG="$(env_get WEB_RUNTIME auto)"
 QUEUE_DRIVER_CFG="${QUEUE_DRIVER:-}"
 [ -z "$QUEUE_DRIVER_CFG" ] && QUEUE_DRIVER_CFG="$(env_get QUEUE_DRIVER auto)"
+
+# Backing-service runtime (INFRA_RUNTIME=auto|podman|host, env var overrides
+# .env): podman runs MySQL/Redis/gearmand from config/podman/compose.yaml;
+# host uses the system-installed services (brew/systemctl). auto prefers
+# podman when it is usable, else falls back to host with a loud red-box
+# warning. Docker is forbidden — only `podman compose` is ever used.
+INFRA_RUNTIME_CFG="${INFRA_RUNTIME:-}"
+[ -z "$INFRA_RUNTIME_CFG" ] && INFRA_RUNTIME_CFG="$(env_get INFRA_RUNTIME auto)"
 
 # ---------------------------------------------------------------------------
 # Web runtime resolution (WEB_RUNTIME: auto|fpm|cli)
@@ -180,20 +197,45 @@ find_gearmand() {
     return 1
 }
 
-# QUEUE_DRIVER is resolved ONCE here and exported to every service started
-# below, so web and workers can never disagree mid-run (auto: gearmand binary
-# present => gearman, else redis). Services never see the literal "auto".
-GEARMAND_BIN="$(find_gearmand)" || GEARMAND_BIN=""
-case "$QUEUE_DRIVER_CFG" in
-    auto|"")
-        if [ -n "$GEARMAND_BIN" ]; then QUEUE_DRIVER_RESOLVED="gearman"; else QUEUE_DRIVER_RESOLVED="redis"; fi
-        ;;
-    *)
-        # gearman|redis pass through; anything else is rejected in cmd_start
-        # (status/logs/stop must keep working with a junk value in .env).
-        QUEUE_DRIVER_RESOLVED="$QUEUE_DRIVER_CFG"
-        ;;
-esac
+# Infra mode resolution (INFRA_RUNTIME: auto|podman|host). This is the
+# NON-PROMPTING resolution used by status/stop/logs; cmd_start re-runs the
+# decision through ensure_infra() which may prompt to start the podman
+# machine and shows the red-box warning when podman is expected but missing.
+INFRA_MODE=""
+resolve_infra_mode_quiet() {
+    case "$INFRA_RUNTIME_CFG" in
+        host)        INFRA_MODE="host" ;;
+        podman)      INFRA_MODE="podman" ;;
+        auto|"")     if podman_usable; then INFRA_MODE="podman"; else INFRA_MODE="host"; fi ;;
+        *)           INFRA_MODE="host" ;;
+    esac
+}
+resolve_infra_mode_quiet
+
+# QUEUE_DRIVER is resolved ONCE and exported to every service started below,
+# so web and workers can never disagree mid-run. auto picks gearman when a
+# host gearmand binary exists OR podman mode is active (the gearmand container
+# is part of the infra tier); else redis. Services never see the literal
+# "auto". Re-run after ensure_infra() in cmd_start in case the mode flipped.
+GEARMAND_BIN=""
+resolve_queue_driver() {
+    GEARMAND_BIN="$(find_gearmand)" || GEARMAND_BIN=""
+    case "$QUEUE_DRIVER_CFG" in
+        auto|"")
+            if [ "$INFRA_MODE" = "podman" ] || [ -n "$GEARMAND_BIN" ]; then
+                QUEUE_DRIVER_RESOLVED="gearman"
+            else
+                QUEUE_DRIVER_RESOLVED="redis"
+            fi
+            ;;
+        *)
+            # gearman|redis pass through; anything else is rejected in
+            # cmd_start (status/logs/stop must keep working with junk in .env).
+            QUEUE_DRIVER_RESOLVED="$QUEUE_DRIVER_CFG"
+            ;;
+    esac
+}
+resolve_queue_driver
 
 # Driver the RUNNING stack actually uses: the marker cmd_start writes wins
 # (the status service and tests read the same file); fresh resolution is the
@@ -563,6 +605,68 @@ add_row() { # $1 symbol-colored, $2 name, $3 detail
 }
 
 # ---------------------------------------------------------------------------
+# Infra (MySQL/Redis/gearmand) — podman vs host. Finalizes INFRA_MODE, shows
+# the red-box warning when podman is expected but missing, brings up the
+# podman backing tier, and offers a host fallback (soft). Called once by
+# cmd_start before the per-service readiness checks.
+# ---------------------------------------------------------------------------
+ensure_infra() {
+    case "$INFRA_RUNTIME_CFG" in
+        host)
+            INFRA_MODE="host"
+            resolve_queue_driver
+            info "infra runtime: host — system-installed MySQL/Redis/gearmand (INFRA_RUNTIME=host)"
+            return 0
+            ;;
+        podman|auto|"") ;;
+        *)
+            err "invalid INFRA_RUNTIME '$INFRA_RUNTIME_CFG' (use auto|podman|host)"
+            exit 1
+            ;;
+    esac
+
+    if podman_available; then
+        INFRA_MODE="podman"
+        resolve_queue_driver   # re-decide gearman/redis now that mode is final
+        info "infra runtime: podman — config/podman/compose.yaml (INFRA_RUNTIME=${INFRA_RUNTIME_CFG:-auto})"
+        info "Starting backing services with podman compose (first run pulls images / builds gearmand)..."
+        # Only run the gearmand container when the queue driver actually uses
+        # it — avoids building/running it under QUEUE_DRIVER=redis.
+        local svcs="mysql redis"
+        [ "$QUEUE_DRIVER_RESOLVED" = "gearman" ] && svcs="$svcs gearmand"
+        # shellcheck disable=SC2086  # svcs is an intentional service list
+        if infra_up $svcs; then
+            ok "podman compose up — $svcs starting"
+        else
+            err "podman compose up failed — see the output above (try: bash launch.sh full up)."
+            if [ "$INFRA_RUNTIME_CFG" = "podman" ]; then
+                exit 1
+            fi
+            warn "Falling back to host-installed services (INFRA_RUNTIME=auto)."
+            INFRA_MODE="host"
+            resolve_queue_driver
+        fi
+        return 0
+    fi
+
+    # Podman expected (auto or explicit) but not usable — be loud.
+    podman_warn_box
+    if [ "$INFRA_RUNTIME_CFG" = "podman" ]; then
+        if ask_yn "Podman is unavailable. Fall back to host-installed MySQL/Redis/gearmand?" y; then
+            INFRA_MODE="host"
+            resolve_queue_driver
+        else
+            err "INFRA_RUNTIME=podman but Podman is unavailable. Install it and re-run: bash launch.sh"
+            exit 1
+        fi
+    else
+        warn "Continuing with host-installed services (INFRA_RUNTIME=auto). Install Podman to containerize them."
+        INFRA_MODE="host"
+        resolve_queue_driver
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # start
 # ---------------------------------------------------------------------------
 cmd_start() {
@@ -629,8 +733,13 @@ cmd_start() {
         info "web runtime: cli — php -S (WEB_RUNTIME=$WEB_RUNTIME_CFG)"
     fi
 
-    # Queue driver — resolved once at the top of the file; validated and
-    # announced here, mirroring the web-runtime line.
+    # Backing-service tier: podman (default) vs host. Finalizes INFRA_MODE and
+    # QUEUE_DRIVER_RESOLVED, brings the podman infra up, and may show the red
+    # box + offer a host fallback. Runs before the readiness probes below.
+    ensure_infra
+
+    # Queue driver — validated and announced here, mirroring the web-runtime
+    # line. INFRA_MODE/QUEUE_DRIVER_RESOLVED are now final (see ensure_infra).
     case "$QUEUE_DRIVER_CFG" in
         auto|""|gearman|redis) ;;
         *)
@@ -638,9 +747,11 @@ cmd_start() {
             exit 1
             ;;
     esac
-    if [ "$QUEUE_DRIVER_RESOLVED" = "gearman" ] && [ -z "$GEARMAND_BIN" ]; then
+    # In podman mode the gearmand container provides the daemon, so the host
+    # binary is only required in host mode.
+    if [ "$QUEUE_DRIVER_RESOLVED" = "gearman" ] && [ "$INFRA_MODE" = "host" ] && [ -z "$GEARMAND_BIN" ]; then
         err "QUEUE_DRIVER=gearman but no gearmand binary found (looked for: gearmand in PATH, /usr/local/sbin, /opt/homebrew/sbin, /usr/sbin, brew prefix)."
-        err "Install it (brew install gearman · sudo apt-get install gearman-job-server) or set QUEUE_DRIVER=redis."
+        err "Install it (brew install gearman · sudo apt-get install gearman-job-server), set QUEUE_DRIVER=redis, or use INFRA_RUNTIME=podman."
         exit 1
     fi
     if [ "$QUEUE_DRIVER_RESOLVED" = "gearman" ]; then
@@ -655,7 +766,17 @@ cmd_start() {
     export QUEUE_DRIVER
 
     # Redis is required: sessions, queues and heartbeats live there.
-    if redis_running; then
+    if [ "$INFRA_MODE" = "podman" ]; then
+        # The container is already coming up (infra_up). Give it a moment to
+        # accept connections, then confirm with the same probe host mode uses.
+        infra_wait_healthy redis 30 >/dev/null 2>&1 || true
+        if redis_running; then
+            ok "Redis is running ($REDIS_HOST:$REDIS_PORT, container rf-redis)"
+        else
+            err "Redis container did not become reachable on $REDIS_HOST:$REDIS_PORT — check: podman logs rf-redis"
+            exit 1
+        fi
+    elif redis_running; then
         ok "Redis is running ($REDIS_HOST:$REDIS_PORT)"
     else
         warn "Redis is not running — sessions, queues and worker heartbeats need it."
@@ -679,9 +800,16 @@ cmd_start() {
     fi
 
     # MySQL: server must be up AND the app database must exist.
+    if [ "$INFRA_MODE" = "podman" ]; then
+        infra_wait_healthy mysql 90 >/dev/null 2>&1 || true
+    fi
     mysql_running
     rc=$?
     if [ "$rc" -eq 2 ]; then
+        if [ "$INFRA_MODE" = "podman" ]; then
+            err "MySQL container not reachable on $DB_HOST:$DB_PORT — check: podman logs rf-mysql"
+            exit 1
+        fi
         warn "MySQL server is not reachable."
         if ask_yn "Start MySQL now?" y; then
             if ! start_mysql; then
@@ -747,8 +875,10 @@ cmd_start() {
     printf '%s\n' "$QUEUE_DRIVER_RESOLVED" > "$RUN_DIR/queue-driver"
 
     # --- start everything -------------------------------------------------
-    # gearmand first: the workers register with it as soon as they boot.
-    if [ "$QUEUE_DRIVER_RESOLVED" = "gearman" ]; then
+    # gearmand first: the workers register with it as soon as they boot. In
+    # podman mode it is already coming up as a container (infra_up); only host
+    # mode needs the launch.sh-managed daemon.
+    if [ "$QUEUE_DRIVER_RESOLVED" = "gearman" ] && [ "$INFRA_MODE" = "host" ]; then
         start_gearmand || fails=$((fails + 1))
     fi
     for name in $APP_SERVICES; do
@@ -770,9 +900,20 @@ cmd_start() {
         printf '%s' "$left"
     }
 
-    # gearmand readiness: pid alive + the admin "status" command answers.
+    # gearmand readiness. host mode: pid alive + admin "status" answers.
+    # podman mode: container running + admin "status" answers (no pid file).
     if [ "$QUEUE_DRIVER_RESOLVED" = "gearman" ]; then
-        if is_running gearmand && wait_gearmand_ready "$(budget_left)"; then
+        if [ "$INFRA_MODE" = "podman" ]; then
+            if infra_container_running gearmand && wait_gearmand_ready "$(budget_left)"; then
+                add_row "${C_GREEN}✓${C_RESET}" "gearmand" "container rf-gearmand · admin status ok · $GEARMAN_HOST:$GEARMAN_PORT"
+            elif infra_container_running gearmand; then
+                add_row "${C_RED}✗${C_RESET}" "gearmand" "container rf-gearmand up but admin status not answering — see: podman logs rf-gearmand"
+                fails=$((fails + 1))
+            else
+                add_row "${C_RED}✗${C_RESET}" "gearmand" "container not running — see: podman logs rf-gearmand"
+                fails=$((fails + 1))
+            fi
+        elif is_running gearmand && wait_gearmand_ready "$(budget_left)"; then
             add_row "${C_GREEN}✓${C_RESET}" "gearmand" "pid $(pid_of gearmand) · admin status ok · $GEARMAN_HOST:$GEARMAN_PORT"
         elif is_running gearmand; then
             add_row "${C_RED}✗${C_RESET}" "gearmand" "pid $(pid_of gearmand) alive but admin status not answering — see storage/logs/gearmand.log"
@@ -894,6 +1035,18 @@ cmd_kill() { # chaos drill: take one service down, whole process tree
             usage; exit 1
             ;;
     esac
+    # In podman mode gearmand is a container, not a host process — chaos-kill
+    # it with `podman kill` so the queue-outage drill still works.
+    if [ "$name" = "gearmand" ] && [ "$INFRA_MODE" = "podman" ]; then
+        if infra_container_running gearmand; then
+            podman kill rf-gearmand >/dev/null 2>&1
+            ok "gearmand container (rf-gearmand) is down. Watch http://localhost:$LB_PORT/status react."
+            info "bring it back with: bash launch.sh start"
+        else
+            info "gearmand container is not running."
+        fi
+        exit 0
+    fi
     if ! is_running "$name"; then
         info "$name is not running."
         exit 0
@@ -915,12 +1068,28 @@ cmd_stop() {
     # nginx wrote storage/run/nginx.pid itself; TERM on the master is the
     # same as `nginx -s stop -c <conf>` without needing the binary.
     stop_service nginx
-    # gearmand is launch.sh-managed too (unlike MySQL/Redis) — its in-memory
-    # queue dies with it, which is fine: jobs are re-derivable from the
-    # pending DB rows and the stack is going down anyway.
-    stop_service gearmand
+    # In host mode gearmand is launch.sh-managed (its in-memory queue dies with
+    # it — fine, jobs are re-derivable from the pending DB rows). In podman
+    # mode it is part of the backing tier, handled below with MySQL/Redis.
+    if [ "$INFRA_MODE" = "host" ]; then
+        stop_service gearmand
+    fi
     rm -f "$RUN_DIR/nginx-validate.out"
-    info "MySQL and Redis are system services — left running (stop them yourself if you want)."
+
+    if [ "$INFRA_MODE" = "podman" ]; then
+        if [ "${STOP_INFRA:-0}" = "1" ]; then
+            info "Stopping podman backing services (MySQL, Redis, gearmand)..."
+            if infra_down; then
+                ok "podman backing services stopped (data volumes preserved)."
+            else
+                warn "podman compose down reported an error — check: podman ps -a"
+            fi
+        else
+            info "Podman backing services left running (stop them with: bash launch.sh stop --infra)."
+        fi
+    else
+        info "MySQL and Redis are system services — left running (stop them yourself if you want)."
+    fi
     exit 0
 }
 
@@ -934,11 +1103,22 @@ cmd_status() {
     info "${C_BOLD}ReliableForm — service status${C_RESET}"
     info "web runtime: $mode"
     info "queue driver: $qdriver"
+    info "infra runtime: $INFRA_MODE"
     echo ""
     printf '  %s %-14s %-10s %s\n' " " "SERVICE" "PID" "DETAIL"
     for name in $ALL_SERVICES; do
-        if is_running "$name"; then
-            p="$(pid_of "$name")"
+        svc_running=0
+        if [ "$name" = "gearmand" ] && [ "$INFRA_MODE" = "podman" ]; then
+            infra_container_running gearmand && svc_running=1
+        elif is_running "$name"; then
+            svc_running=1
+        fi
+        if [ "$svc_running" = "1" ]; then
+            if [ "$name" = "gearmand" ] && [ "$INFRA_MODE" = "podman" ]; then
+                p="rf-gearmand"
+            else
+                p="$(pid_of "$name")"
+            fi
             sym="${C_GREEN}✓${C_RESET}"
             detail=""
             case "$name" in
@@ -997,15 +1177,19 @@ cmd_status() {
         fi
     done
     echo ""
+    local infra_tag=""
+    [ "$INFRA_MODE" = "podman" ] && infra_tag=", container rf-redis"
     if redis_running; then
-        ok "redis: running ($REDIS_HOST:$REDIS_PORT)"
+        ok "redis: running ($REDIS_HOST:$REDIS_PORT$infra_tag)"
     else
         warn "redis: not running (or redis-cli missing)"
     fi
+    infra_tag=""
+    [ "$INFRA_MODE" = "podman" ] && infra_tag=" (container rf-mysql)"
     if [ -f "$ROOT/.env" ] && have php; then
         mysql_running
         case $? in
-            0) ok "mysql: running, app database reachable" ;;
+            0) ok "mysql: running, app database reachable$infra_tag" ;;
             1) warn "mysql: server up, but app database missing — run: bash setup.sh" ;;
             *) warn "mysql: not reachable" ;;
         esac
@@ -1059,6 +1243,56 @@ cmd_logs() {
 }
 
 # ---------------------------------------------------------------------------
+# full — run the ENTIRE stack (app tier included) in podman, via
+# config/podman/compose.full.yaml. This is the optional "run anywhere" path;
+# the default `start` keeps the app tier as host processes for the chaos-kill
+# drills. launch.sh just wraps `podman compose` here.
+# ---------------------------------------------------------------------------
+cmd_full() {
+    if ! podman_available; then
+        podman_warn_box
+        err "The full-stack path requires Podman."
+        exit 1
+    fi
+    if [ ! -f "$PODMAN_FULL_COMPOSE_FILE" ]; then
+        err "Missing $PODMAN_FULL_COMPOSE_FILE."
+        exit 1
+    fi
+    case "$FULL_TARGET" in
+        up|"")
+            info "${C_BOLD}ReliableForm — full stack in podman${C_RESET}"
+            info "Building/starting every service from config/podman/compose.full.yaml..."
+            if infra_compose "$PODMAN_FULL_COMPOSE_FILE" up -d --build; then
+                ok "Full stack up → http://localhost:$LB_PORT"
+                info "status   bash launch.sh full   (re-run to see compose state below)"
+                infra_compose "$PODMAN_FULL_COMPOSE_FILE" ps
+                exit 0
+            fi
+            err "podman compose up (full) failed — see the output above."
+            exit 1
+            ;;
+        down)
+            info "${C_BOLD}ReliableForm — tearing down the full podman stack${C_RESET}"
+            if infra_compose "$PODMAN_FULL_COMPOSE_FILE" down; then
+                ok "Full stack stopped (named volumes preserved)."
+                exit 0
+            fi
+            warn "podman compose down (full) reported an error — check: podman ps -a"
+            exit 1
+            ;;
+        ps|status)
+            infra_compose "$PODMAN_FULL_COMPOSE_FILE" ps
+            exit 0
+            ;;
+        *)
+            err "unknown 'full' target '$FULL_TARGET' (use up|down|ps)."
+            usage
+            exit 1
+            ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
 case "$CMD" in
@@ -1072,4 +1306,5 @@ case "$CMD" in
     status)  cmd_status ;;
     logs)    cmd_logs ;;
     kill)    cmd_kill ;;
+    full)    cmd_full ;;
 esac

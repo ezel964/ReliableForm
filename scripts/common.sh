@@ -262,3 +262,10 @@ start_mysql() {
     done
     return 1
 }
+
+# ---------------------------------------------------------------------------
+# Podman helpers (backing-service containers). Sourced last so it can rely on
+# everything above (have, info/warn/err, ask_yn, OS, $ROOT).
+# ---------------------------------------------------------------------------
+# shellcheck source=scripts/podman.sh
+. "$ROOT/scripts/podman.sh"

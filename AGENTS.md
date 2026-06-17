@@ -14,8 +14,10 @@ ReliableForm is a JotForm-style form builder whose **real purpose is the product
 bash setup.sh                 # one-time: interactive dep check/install, create+seed DB. --yes for CI
 bash launch.sh                # start the whole stack, print a ✓/✗ health table. --yes for CI
 bash launch.sh stop|restart|status
+bash launch.sh stop --infra   # also stop the podman backing services (else left running)
 bash launch.sh logs <svc>     # tail a service log
 bash launch.sh kill <svc>     # kill one service (failure drills); `start` brings it back
+bash launch.sh full up|down   # OPTIONAL: run the WHOLE stack in podman (config/podman/compose.full.yaml)
 ```
 
 Service names (the `<svc>` argument): `web1 web2 status worker-pdf worker-email worker-webhook otel nginx gearmand`.
@@ -53,10 +55,12 @@ There is **no linter or formatter** and no composer/PHP package manager — conv
 
 ## Architecture you can't see from one file
 
-- **Driver facades resolved at launch, never mid-run.** Three runtime shapes are env-selected and `launch.sh` resolves the ambiguous ones *once* and exports the decision to every process so services can't disagree:
+- **Driver facades resolved at launch, never mid-run.** Four runtime shapes are env-selected and `launch.sh` resolves the ambiguous ones *once* and exports the decision to every process so services can't disagree:
   - `WEB_RUNTIME=auto|fpm|cli` — PHP-FPM pools (production parity, opcache on) vs `php -S`.
-  - `QUEUE_DRIVER=auto|gearman|redis` — gearmand + `lib/GearmanLite.php` (pure-PHP binary protocol) vs Redis lists. `lib/Queue.php` is a facade with **unchanged public API and metric names** across drivers; `lib/WorkerLoop.php` hides the consume split. Dead letters always go to the Redis `queue:dead` list regardless of driver.
+  - `QUEUE_DRIVER=auto|gearman|redis` — gearmand + `lib/GearmanLite.php` (pure-PHP binary protocol) vs Redis lists. `lib/Queue.php` is a facade with **unchanged public API and metric names** across drivers; `lib/WorkerLoop.php` hides the consume split. Dead letters always go to the Redis `queue:dead` list regardless of driver. In podman mode `auto` picks gearman (the gearmand container is part of the infra tier).
   - `SESSION_DRIVER=mysql|redis` — MySQL `sessions` table (default, production parity; sessions survive a Redis outage) vs Redis.
+  - `INFRA_RUNTIME=auto|podman|host` — where the **backing services** (MySQL, Redis, gearmand) run. See the dedicated section below.
+- **Backing services run in Podman, not Docker (forbidden).** `config/podman/compose.yaml` is the single source of truth for the MySQL/Redis/gearmand tier; `launch.sh`/`setup.sh` drive it through `podman compose` (helpers in `scripts/podman.sh`, resolved once into `INFRA_MODE`). **The containers publish to the SAME `127.0.0.1` ports the app already uses (3306/6379/4730)**, so app code, `.env`, and every probe (`redis_running`, `mysql_running` via PDO, `gearmand_status_ok`) are identical in podman and host mode — only the "ensure these are up" logic branches. `auto` prefers podman when usable (on macOS it offers to start the `podman machine`), else shows a **red-box warning** and falls back to host-installed services. The **app tier (web1/web2, status, workers, nginx) is deliberately NOT containerized** by default so the per-instance chaos-kill drills and php-fpm parity stay intact. `config/podman/compose.full.yaml` (+ `Containerfile.php`, `fpm-pool.conf`, `nginx.full.conf`) is the OPTIONAL whole-stack "run anywhere" path behind `bash launch.sh full up`; it self-initializes MySQL from `db/schema.sql`+`seed.sql`. In podman mode `setup.sh` skips the MySQL admin bootstrap (the container env creates the DB/user/grants) and applies schema/seed via `podman exec`.
 - **The `lib/` kernel is finished and lint-clean — read it, code against it, do not modify or redefine it.** Every PHP entry point starts with `require .../lib/bootstrap.php`, which defines `RF_ROOT`, loads `.env` via `Config`, registers the autoloader, sets UTC + error handlers. The kernel already handles the subtle stuff (BLPOP socket-timeout pitfall, session fixation defense, `X-Forwarded-For` in `request_ip()`, friendly 500 page). The full callable API is the "Kernel API" section of `docs/ARCHITECTURE.md`.
 - **Routing is one front controller.** `apps/web/public/index.php` is both the router and the `php -S` router script (returns `false` for real files under `public/`). Routes are an if/else ladder of `preg_match` patterns; each sets a `$routePattern` token (e.g. `/f/{public_id}`) used verbatim in spans and logs. A `register_shutdown_function` emits the per-request metric/span/AppLog for every path.
 - **`/v1/*` is a separate world.** Matched first, before the CSRF guard, dispatched into `apps/web/src/api/` with `RF_API` defined (bootstrap then emits the JSON envelope instead of HTML). It is **sessionless by contract**: never call `Session::start()`, `Csrf`, or `Auth::user()` on that path — no cookie may be minted for API traffic. It uses the `api.*` metric family; web traffic uses `web.*`; never both for one request. Note `/api/*` is the *Node status service* (nginx routes it there), distinct from `/v1/*`.
@@ -68,7 +72,7 @@ There is **no linter or formatter** and no composer/PHP package manager — conv
 
 - **PHP:** `declare(strict_types=1);` everywhere, PHP 8.2+, no composer/frameworks, prepared statements only, `e()` on all HTML output, `Csrf::validate()` at the top of every POST handler.
 - **Node status service:** no dependency beyond `mysql2`, no build step. (The separate `frontend/` pnpm+Rspack workspace is the only place with a build.)
-- **Shell scripts must be macOS bash 3.2 compatible** — no associative arrays, no `mapfile`. Render config templates with **sed-to-stdout (`sed ... > out`), never `sed -i`** (not portable). Helpers live in `scripts/common.sh`.
+- **Shell scripts must be macOS bash 3.2 compatible** — no associative arrays, no `mapfile`. Render config templates with **sed-to-stdout (`sed ... > out`), never `sed -i`** (not portable). Helpers live in `scripts/common.sh`; Podman/compose helpers live in `scripts/podman.sh` (sourced by `common.sh`). Containers are driven with `podman compose` ONLY — never `docker`.
 - **Time is always UTC** for stats buckets and timestamps (`gmdate` in PHP, `getUTC*` in Node) — never local time.
 - **Observability is toggleable and zero-cost when off** by design (`APPLOG_ENABLED`, `OTEL_EXPORTER_OTLP_ENDPOINT` unset, no frontend manifest, `CLIENTLOG_ENABLED`). Don't add always-on instrumentation overhead. Metric/log/span catalog is `docs/METRICS.md`.
 

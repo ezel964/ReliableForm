@@ -1,0 +1,17 @@
+# gearmand for ReliableForm's queue tier.
+#
+# There is no reliable official gearmand image, so we build a tiny one from
+# Debian's gearman-job-server package (the same package launch.sh installs
+# for host mode). gearmand stays OPTIONAL: QUEUE_DRIVER=auto still falls back
+# to the Redis queue driver when this service is absent.
+FROM docker.io/library/debian:bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gearman-job-server \
+    && rm -rf /var/lib/apt/lists/*
+
+EXPOSE 4730
+
+# Foreground, listen on all interfaces inside the container (published to
+# 127.0.0.1 on the host by compose), log to stderr so `podman logs` works.
+CMD ["gearmand", "--listen", "0.0.0.0", "--port", "4730", "--log-file", "stderr", "--verbose", "INFO"]

@@ -205,6 +205,44 @@ check_gearmand() {
     return 0
 }
 
+# Backing-service runtime (INFRA_RUNTIME=auto|podman|host). podman runs
+# MySQL/Redis/gearmand as containers (config/podman/compose.yaml); host uses
+# system-installed services. auto prefers podman when usable, else falls back
+# to host with the red-box warning. Docker is forbidden — podman compose only.
+INFRA_RUNTIME_CFG="${INFRA_RUNTIME:-}"
+[ -z "$INFRA_RUNTIME_CFG" ] && INFRA_RUNTIME_CFG="$(env_get INFRA_RUNTIME auto)"
+INFRA_MODE=""
+case "$INFRA_RUNTIME_CFG" in
+    host) INFRA_MODE="host" ;;
+    podman|auto|"")
+        if podman_available; then
+            INFRA_MODE="podman"
+        else
+            podman_warn_box
+            if [ "$INFRA_RUNTIME_CFG" = "podman" ]; then
+                if ask_yn "Podman unavailable. Fall back to host-installed MySQL/Redis/gearmand for setup?" y; then
+                    INFRA_MODE="host"
+                else
+                    err "INFRA_RUNTIME=podman but Podman is unavailable. Install it and re-run: bash setup.sh"
+                    exit 1
+                fi
+            else
+                warn "Continuing with host-installed services (INFRA_RUNTIME=auto). Install Podman to containerize them."
+                INFRA_MODE="host"
+            fi
+        fi
+        ;;
+    *)
+        err "invalid INFRA_RUNTIME '$INFRA_RUNTIME_CFG' (use auto|podman|host)"
+        exit 1
+        ;;
+esac
+if [ "$INFRA_MODE" = "podman" ]; then
+    ok "infra runtime: podman — MySQL/Redis/gearmand run as containers (config/podman/compose.yaml)"
+else
+    info "infra runtime: host — MySQL/Redis/gearmand expected as system services"
+fi
+
 PHP_READY=0;   check_dep php   "PHP >= 8.1 with pdo_mysql"        php_ok          "PHP runs the web tier, both workers and the DB probe." || PHP_READY=1
 NODE_READY=0;  check_dep node  "Node.js >= 18"                    node_ok         "Node runs the status & analytics service." || NODE_READY=1
 NPM_READY=0
@@ -213,11 +251,25 @@ if npm_ok; then
 else
     check_dep node "npm" npm_ok "npm installs the status service's one dependency (mysql2)." || NPM_READY=1
 fi
-MYSQL_READY=0; check_dep mysql "MySQL client + server"            mysql_client_ok "MySQL stores users, forms, submissions and job rows." || MYSQL_READY=1
-REDIS_READY=0; check_dep redis "Redis"                            redis_ok        "Redis backs sessions, caches, queues and worker heartbeats." || REDIS_READY=1
+# In podman mode MySQL/Redis/gearmand are containers — no host client/server
+# is required (schema is applied through `podman exec`). In host mode they are
+# checked/installed as before.
+MYSQL_READY=0
+REDIS_READY=0
+if [ "$INFRA_MODE" = "host" ]; then
+    check_dep mysql "MySQL client + server"            mysql_client_ok "MySQL stores users, forms, submissions and job rows." || MYSQL_READY=1
+    check_dep redis "Redis"                            redis_ok        "Redis backs sessions, caches, queues and worker heartbeats." || REDIS_READY=1
+else
+    ok "MySQL — provided by the rf-mysql container (no host client needed)"
+    ok "Redis — provided by the rf-redis container (no host client needed)"
+fi
 NGINX_READY=0; check_dep nginx "Nginx"                            nginx_ok        "Nginx is the load balancer / front door on port 8080." || NGINX_READY=1
 check_php_fpm
-check_gearmand
+if [ "$INFRA_MODE" = "host" ]; then
+    check_gearmand
+else
+    ok "gearmand — provided by the rf-gearmand container (built on first launch)"
+fi
 
 # php and mysql are required to bootstrap the database — bail out if missing.
 if [ "$PHP_READY" -ne 0 ]; then
@@ -259,28 +311,63 @@ DB_PASS="$(env_get DB_PASS reliableform)"
 info "Database target: $DB_NAME on $DB_HOST:$DB_PORT as $DB_USER"
 echo ""
 
+# Run the mysql client as the APP user against the app database. In podman
+# mode this goes through `podman exec` into the rf-mysql container, so NO host
+# mysql client is needed; in host mode it connects over TCP. MYSQL_PWD (vs -p)
+# avoids the "password on the command line is insecure" warning.
+mysql_app() {
+    if [ "$INFRA_MODE" = "podman" ]; then
+        podman exec -i -e MYSQL_PWD="$DB_PASS" rf-mysql \
+            mysql -h 127.0.0.1 -P 3306 -u "$DB_USER" "$DB_NAME" "$@"
+    else
+        MYSQL_PWD="$DB_PASS" mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" "$DB_NAME" "$@"
+    fi
+}
+
 # ---------------------------------------------------------------------------
 # 3. MySQL server running?
 # ---------------------------------------------------------------------------
 info "${C_BOLD}Step 3/6 — MySQL server${C_RESET}"
-mysql_running
-MYSQL_STATE=$?
-if [ "$MYSQL_STATE" -eq 2 ]; then
-    warn "MySQL server is not reachable on $DB_HOST:$DB_PORT."
-    if ask_yn "Start MySQL now?" y; then
-        if start_mysql; then
-            ok "MySQL server is up."
-        else
-            err "Could not start MySQL."
-            err "Start it manually (macOS: brew services start mysql · Linux: sudo systemctl start mysql), then re-run: bash setup.sh"
-            exit 1
-        fi
+if [ "$INFRA_MODE" = "podman" ]; then
+    info "Bringing up the podman backing services (first run pulls the MySQL/Redis images)..."
+    if ! infra_up mysql redis; then
+        err "podman compose up failed — see the output above."
+        exit 1
+    fi
+    info "Waiting for the MySQL container to become healthy..."
+    if infra_wait_healthy mysql 120; then
+        ok "MySQL container (rf-mysql) is healthy — database/user created from compose env."
     else
-        err "MySQL must be running to create the database. Start it, then re-run: bash setup.sh"
+        err "MySQL container did not become healthy in time — check: podman logs rf-mysql"
+        exit 1
+    fi
+    # Confirm the app can actually reach it over the published port.
+    mysql_running
+    if [ $? -eq 2 ]; then
+        err "MySQL container is up but not reachable on $DB_HOST:$DB_PORT — is the port published?"
+        err "Check: podman ps   (expect 127.0.0.1:$DB_PORT->3306)"
         exit 1
     fi
 else
-    ok "MySQL server is running."
+    mysql_running
+    MYSQL_STATE=$?
+    if [ "$MYSQL_STATE" -eq 2 ]; then
+        warn "MySQL server is not reachable on $DB_HOST:$DB_PORT."
+        if ask_yn "Start MySQL now?" y; then
+            if start_mysql; then
+                ok "MySQL server is up."
+            else
+                err "Could not start MySQL."
+                err "Start it manually (macOS: brew services start mysql · Linux: sudo systemctl start mysql), then re-run: bash setup.sh"
+                exit 1
+            fi
+        else
+            err "MySQL must be running to create the database. Start it, then re-run: bash setup.sh"
+            exit 1
+        fi
+    else
+        ok "MySQL server is running."
+    fi
 fi
 echo ""
 
@@ -290,83 +377,96 @@ echo ""
 info "${C_BOLD}Step 4/6 — database + app user${C_RESET}"
 mkdir -p "$ROOT/storage/logs"   # used for the admin-mysql error capture below
 
-BOOTSTRAP_SQL="CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+if [ "$INFRA_MODE" = "podman" ]; then
+    # The rf-mysql container already created the database, the app user
+    # ('$DB_USER'@'%'), and the grants from its MYSQL_* env on first boot —
+    # there is no separate admin step. Verify the app user can actually
+    # connect to its database (this is what every later command relies on).
+    if mysql_app -e "SELECT 1" >/dev/null 2>&1; then
+        ok "Database '$DB_NAME' and user '$DB_USER' are in place (created by the rf-mysql container)."
+    else
+        err "App user '$DB_USER' cannot connect to '$DB_NAME' inside rf-mysql."
+        err "If you changed DB_* after the volume was created, the old creds persist."
+        err "Reset with: bash launch.sh stop --infra && podman volume rm reliableform_rf-mysql-data, then re-run setup."
+        exit 1
+    fi
+else
+    BOOTSTRAP_SQL="CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE USER IF NOT EXISTS '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';
 CREATE USER IF NOT EXISTS '$DB_USER'@'127.0.0.1' IDENTIFIED BY '$DB_PASS';
 GRANT ALL PRIVILEGES ON \`$DB_NAME\`.* TO '$DB_USER'@'localhost';
 GRANT ALL PRIVILEGES ON \`$DB_NAME\`.* TO '$DB_USER'@'127.0.0.1';
 FLUSH PRIVILEGES;"
 
-ADMIN_USER="root"
-ADMIN_PASS=""
-ADMIN_OK=0
+    ADMIN_USER="root"
+    ADMIN_PASS=""
+    ADMIN_OK=0
 
-# Fresh Homebrew MySQL installs have passwordless root over the local socket —
-# try that silently first so most macOS users are never prompted.
-if mysql -u root -e 'SELECT 1' >/dev/null 2>&1; then
-    ok "MySQL admin access works as 'root' with no password — using it."
-    ADMIN_OK=1
-else
-    ADMIN_USER="$(prompt_value "MySQL admin user" "root")"
-    ADMIN_PASS="$(prompt_secret "MySQL admin password for '$ADMIN_USER'")"
-fi
-
-BOOTSTRAP_DONE=0
-if [ "$ADMIN_OK" -eq 1 ] || [ -z "$ADMIN_PASS" ]; then
-    if printf '%s\n' "$BOOTSTRAP_SQL" | mysql -u "$ADMIN_USER" 2>"$ROOT/storage/logs/setup-mysql.err"; then
-        BOOTSTRAP_DONE=1
+    # Fresh Homebrew MySQL installs have passwordless root over the local
+    # socket — try that silently first so most macOS users are never prompted.
+    if mysql -u root -e 'SELECT 1' >/dev/null 2>&1; then
+        ok "MySQL admin access works as 'root' with no password — using it."
+        ADMIN_OK=1
+    else
+        ADMIN_USER="$(prompt_value "MySQL admin user" "root")"
+        ADMIN_PASS="$(prompt_secret "MySQL admin password for '$ADMIN_USER'")"
     fi
-else
-    # MYSQL_PWD (env, command-scoped) avoids the "password on the command
-    # line interface can be insecure" warning that -p produces.
-    if printf '%s\n' "$BOOTSTRAP_SQL" | MYSQL_PWD="$ADMIN_PASS" mysql -u "$ADMIN_USER" 2>"$ROOT/storage/logs/setup-mysql.err"; then
-        BOOTSTRAP_DONE=1
-    fi
-fi
 
-# apt-installed MySQL/MariaDB authenticates root via auth_socket → sudo mysql.
-if [ "$BOOTSTRAP_DONE" -ne 1 ] && [ "$OS" = "linux" ] && [ "$PKG_MANAGER" = "apt" ] && have sudo; then
-    warn "Admin login failed — retrying with 'sudo mysql' (apt installs use auth_socket for root)."
-    if printf '%s\n' "$BOOTSTRAP_SQL" | sudo mysql 2>"$ROOT/storage/logs/setup-mysql.err"; then
-        BOOTSTRAP_DONE=1
+    BOOTSTRAP_DONE=0
+    if [ "$ADMIN_OK" -eq 1 ] || [ -z "$ADMIN_PASS" ]; then
+        if printf '%s\n' "$BOOTSTRAP_SQL" | mysql -u "$ADMIN_USER" 2>"$ROOT/storage/logs/setup-mysql.err"; then
+            BOOTSTRAP_DONE=1
+        fi
+    else
+        # MYSQL_PWD (env, command-scoped) avoids the "password on the command
+        # line interface can be insecure" warning that -p produces.
+        if printf '%s\n' "$BOOTSTRAP_SQL" | MYSQL_PWD="$ADMIN_PASS" mysql -u "$ADMIN_USER" 2>"$ROOT/storage/logs/setup-mysql.err"; then
+            BOOTSTRAP_DONE=1
+        fi
     fi
-fi
 
-if [ "$BOOTSTRAP_DONE" -ne 1 ]; then
-    err "Could not create the database/user as a MySQL admin."
-    [ -s "$ROOT/storage/logs/setup-mysql.err" ] && sed 's/^/    /' "$ROOT/storage/logs/setup-mysql.err" >&2
-    echo ""
-    info "Run this SQL yourself as a MySQL admin, then re-run: bash setup.sh"
-    echo ""
-    printf '%s\n' "$BOOTSTRAP_SQL" | sed 's/^/    /'
-    echo ""
-    exit 1
+    # apt-installed MySQL/MariaDB authenticates root via auth_socket → sudo mysql.
+    if [ "$BOOTSTRAP_DONE" -ne 1 ] && [ "$OS" = "linux" ] && [ "$PKG_MANAGER" = "apt" ] && have sudo; then
+        warn "Admin login failed — retrying with 'sudo mysql' (apt installs use auth_socket for root)."
+        if printf '%s\n' "$BOOTSTRAP_SQL" | sudo mysql 2>"$ROOT/storage/logs/setup-mysql.err"; then
+            BOOTSTRAP_DONE=1
+        fi
+    fi
+
+    if [ "$BOOTSTRAP_DONE" -ne 1 ]; then
+        err "Could not create the database/user as a MySQL admin."
+        [ -s "$ROOT/storage/logs/setup-mysql.err" ] && sed 's/^/    /' "$ROOT/storage/logs/setup-mysql.err" >&2
+        echo ""
+        info "Run this SQL yourself as a MySQL admin, then re-run: bash setup.sh"
+        echo ""
+        printf '%s\n' "$BOOTSTRAP_SQL" | sed 's/^/    /'
+        echo ""
+        exit 1
+    fi
+    rm -f "$ROOT/storage/logs/setup-mysql.err"
+    ok "Database '$DB_NAME' and user '$DB_USER'@{localhost,127.0.0.1} are in place."
 fi
-rm -f "$ROOT/storage/logs/setup-mysql.err"
-ok "Database '$DB_NAME' and user '$DB_USER'@{localhost,127.0.0.1} are in place."
 
 # Was this database already in use BEFORE this setup run? Captured now —
-# after CREATE DATABASE IF NOT EXISTS but before any tables are created — so
-# the migration runner below knows whether to baseline (fresh: schema.sql is
-# the complete current schema) or apply pending migrations (existing).
-mysql_app() { # run mysql as the app user over TCP against the app database
-    MYSQL_PWD="$DB_PASS" mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" "$DB_NAME" "$@"
-}
-TABLE_COUNT="$(MYSQL_PWD="$DB_PASS" mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -N -B \
+# before any tables are created — so the migration runner below knows whether
+# to baseline (fresh: schema.sql is the complete current schema) or apply
+# pending migrations (existing). mysql_app routes through the rf-mysql
+# container in podman mode and over TCP in host mode (defined in Step 2).
+TABLE_COUNT="$(mysql_app -N -B \
     -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='$DB_NAME'" 2>/dev/null)"
 FRESH_DB=0
 [ "$TABLE_COUNT" = "0" ] && FRESH_DB=1
 
-# Apply schema + seed AS THE APP USER over TCP — this validates the grants
-# end-to-end with exactly the credentials the app will use.
-if MYSQL_PWD="$DB_PASS" mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" "$DB_NAME" < "$ROOT/db/schema.sql"; then
+# Apply schema + seed AS THE APP USER — this validates the grants end-to-end
+# with exactly the credentials the app will use.
+if mysql_app < "$ROOT/db/schema.sql"; then
     ok "Schema applied (db/schema.sql — idempotent)."
 else
-    err "Could not apply db/schema.sql as '$DB_USER'@$DB_HOST:$DB_PORT."
-    err "Check DB_* in .env matches the user just created, then re-run: bash setup.sh"
+    err "Could not apply db/schema.sql as '$DB_USER'."
+    err "Check DB_* in .env matches the user, then re-run: bash setup.sh"
     exit 1
 fi
-if MYSQL_PWD="$DB_PASS" mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" "$DB_NAME" < "$ROOT/db/seed.sql"; then
+if mysql_app < "$ROOT/db/seed.sql"; then
     ok "Demo data seeded (db/seed.sql — idempotent)."
 else
     err "Could not apply db/seed.sql. Fix the error above and re-run: bash setup.sh"

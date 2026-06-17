@@ -1,0 +1,74 @@
+# ReliableForm — backing services (MySQL, Redis, gearmand) for Podman.
+#
+# This file is the single source of truth for the stateful infra tier.
+# launch.sh and setup.sh drive it with:
+#   podman compose -f config/podman/compose.yaml --env-file .env up -d
+#
+# Docker is forbidden in this project — use `podman compose` only.
+#
+# Every service publishes to 127.0.0.1 on the SAME ports the app already
+# expects (.env DB_PORT/REDIS_PORT/GEARMAN_PORT), so the PHP/Node app tier,
+# the .env file, and every probe (redis_running, mysql_running via PDO,
+# gearmand_status_ok) work UNCHANGED whether infra runs in Podman or on the
+# host. The MySQL image creates the app database + user + grants on first
+# boot from the env below; setup.sh then applies schema/seed/migrations over
+# TCP exactly as it does for a host MySQL.
+
+name: reliableform
+
+services:
+  mysql:
+    image: ${MYSQL_IMAGE:-docker.io/library/mysql:8.4}
+    container_name: rf-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpass}
+      MYSQL_DATABASE: ${DB_NAME:-reliableform}
+      MYSQL_USER: ${DB_USER:-reliableform}
+      MYSQL_PASSWORD: ${DB_PASS:-reliableform}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    ports:
+      - "127.0.0.1:${DB_PORT:-3306}:3306"
+    volumes:
+      - rf-mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "--silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  redis:
+    image: ${REDIS_IMAGE:-docker.io/library/redis:7-alpine}
+    container_name: rf-redis
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    volumes:
+      - rf-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  gearmand:
+    build:
+      context: .
+      dockerfile: Containerfile.gearmand
+    image: localhost/rf-gearmand:latest
+    container_name: rf-gearmand
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${GEARMAN_PORT:-4730}:4730"
+    # No container healthcheck: the debian-slim image's /bin/sh is dash (no
+    # bash /dev/tcp) and ships no gearman admin client. launch.sh confirms
+    # readiness with a real TCP "status" probe (gearmand_status_ok) from the
+    # host, so infra_container_healthy treats "running" as healthy here.
+
+volumes:
+  rf-mysql-data:
+  rf-redis-data:

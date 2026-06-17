@@ -1,0 +1,189 @@
+# ReliableForm — OPTIONAL full-stack in Podman ("run anywhere").
+#
+#   podman compose -f config/podman/compose.full.yaml --env-file .env up -d --build
+#   (or: bash launch.sh full up)
+#
+# This runs EVERY service in containers: MySQL, Redis, gearmand, two PHP-FPM
+# web pools, the Node status service, the three workers, and nginx as the LB.
+#
+# The default `bash launch.sh start` keeps the app tier as host processes so
+# the per-instance chaos-kill drills and php-fpm parity stay intact; this file
+# is the portable alternative. The repo is mounted at /app in every app
+# container, so code edits on the host are picked up without rebuilding.
+#
+# Docker is forbidden — drive this with `podman compose` only.
+
+name: reliableform-full
+
+# Shared environment for the PHP/Node app tier. Service NAMES are the hosts on
+# the compose network (not 127.0.0.1); these real env vars override .env in
+# lib/Config.php / apps/status. The queue runs on gearmand here.
+x-app-env: &app-env
+  APP_ENV: ${APP_ENV:-dev}
+  APP_URL: ${APP_URL:-http://localhost:8080}
+  DB_HOST: mysql
+  DB_PORT: "3306"
+  DB_NAME: ${DB_NAME:-reliableform}
+  DB_USER: ${DB_USER:-reliableform}
+  DB_PASS: ${DB_PASS:-reliableform}
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  GEARMAN_HOST: gearmand
+  GEARMAN_PORT: "4730"
+  QUEUE_DRIVER: gearman
+  SESSION_DRIVER: ${SESSION_DRIVER:-mysql}
+  STATUS_PORT: "9301"
+
+services:
+  mysql:
+    image: ${MYSQL_IMAGE:-docker.io/library/mysql:8.4}
+    container_name: rf-full-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpass}
+      MYSQL_DATABASE: ${DB_NAME:-reliableform}
+      MYSQL_USER: ${DB_USER:-reliableform}
+      MYSQL_PASSWORD: ${DB_PASS:-reliableform}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - rf-full-mysql-data:/var/lib/mysql
+      # Self-initialize on a FRESH volume: schema.sql is the complete current
+      # schema (so migrations are not needed — they would be baselined), then
+      # the demo seed. The image runs these once, in name order, as root.
+      - ../../db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ../../db/seed.sql:/docker-entrypoint-initdb.d/02-seed.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "--silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  redis:
+    image: ${REDIS_IMAGE:-docker.io/library/redis:7-alpine}
+    container_name: rf-full-redis
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  gearmand:
+    build:
+      context: .
+      dockerfile: Containerfile.gearmand
+    image: localhost/rf-gearmand:latest
+    container_name: rf-full-gearmand
+    restart: unless-stopped
+
+  web1:
+    build:
+      context: .
+      dockerfile: Containerfile.php
+    image: localhost/rf-php:latest
+    container_name: rf-full-web1
+    restart: unless-stopped
+    environment:
+      <<: *app-env
+      INSTANCE_ID: web1
+    volumes:
+      - ../../:/app
+    depends_on:
+      mysql: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+  web2:
+    image: localhost/rf-php:latest
+    container_name: rf-full-web2
+    restart: unless-stopped
+    environment:
+      <<: *app-env
+      INSTANCE_ID: web2
+    volumes:
+      - ../../:/app
+    depends_on:
+      mysql: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      web1: { condition: service_started }
+
+  status:
+    image: docker.io/library/node:20-alpine
+    container_name: rf-full-status
+    restart: unless-stopped
+    working_dir: /app/apps/status
+    # Install the one dependency (mysql2) into the mounted volume on first
+    # boot, then run the service.
+    command: ["sh", "-c", "npm install --no-audit --no-fund --loglevel=error && node server.js"]
+    environment:
+      <<: *app-env
+      INSTANCE_ID: status
+    volumes:
+      - ../../:/app
+    depends_on:
+      mysql: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+  worker-pdf:
+    image: localhost/rf-php:latest
+    container_name: rf-full-worker-pdf
+    restart: unless-stopped
+    command: ["php", "/app/apps/workers/pdf_worker.php"]
+    environment:
+      <<: *app-env
+      INSTANCE_ID: worker-pdf
+    volumes:
+      - ../../:/app
+    depends_on:
+      mysql: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      gearmand: { condition: service_started }
+
+  worker-email:
+    image: localhost/rf-php:latest
+    container_name: rf-full-worker-email
+    restart: unless-stopped
+    command: ["php", "/app/apps/workers/email_worker.php"]
+    environment:
+      <<: *app-env
+      INSTANCE_ID: worker-email
+    volumes:
+      - ../../:/app
+    depends_on:
+      mysql: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      gearmand: { condition: service_started }
+
+  worker-webhook:
+    image: localhost/rf-php:latest
+    container_name: rf-full-worker-webhook
+    restart: unless-stopped
+    command: ["php", "/app/apps/workers/webhook_worker.php"]
+    environment:
+      <<: *app-env
+      INSTANCE_ID: worker-webhook
+    volumes:
+      - ../../:/app
+    depends_on:
+      mysql: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      gearmand: { condition: service_started }
+
+  nginx:
+    image: docker.io/library/nginx:1.27-alpine
+    container_name: rf-full-nginx
+    restart: unless-stopped
+    ports:
+      - "${LB_PORT:-8080}:80"
+    volumes:
+      - ../../:/app:ro
+      - ./nginx.full.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      web1: { condition: service_started }
+      web2: { condition: service_started }
+      status: { condition: service_started }
+
+volumes:
+  rf-full-mysql-data:
