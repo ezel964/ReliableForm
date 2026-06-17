@@ -49,6 +49,37 @@ Linux). Add `--yes` to either script for non-interactive/CI use. Schema
 changes ship as `db/migrations/*.sql`; re-running `setup.sh` applies pending
 ones (see [docs/RUNBOOK.md](docs/RUNBOOK.md)).
 
+### Backing services run in Podman (not Docker)
+
+The stateful tier — **MySQL, Redis, gearmand** — runs in [Podman](https://podman.io)
+containers, defined once in `config/podman/compose.yaml` and driven by
+`setup.sh`/`launch.sh` through `podman compose`. Docker is intentionally not
+used. The containers publish to the **same `127.0.0.1` ports** the app already
+expects (3306/6379/4730), so nothing else in the stack changes between modes.
+
+`INFRA_RUNTIME` in `.env` (env var overrides) selects the mode:
+
+| value | behavior |
+|---|---|
+| `auto` (default) | use Podman when usable (on macOS it offers to start the `podman machine`); otherwise show a red-box warning and fall back to host-installed MySQL/Redis/gearmand |
+| `podman` | require Podman (offers a host fallback if it is unavailable) |
+| `host` | the classic path: system-installed services via brew/systemctl |
+
+The **app tier (web1/web2, status, workers, nginx) stays as host processes** so
+the per-instance chaos-kill drills and php-fpm parity are unaffected. To run the
+*entire* stack in Podman instead (portable "run anywhere"), use the optional
+full-stack compose:
+
+```bash
+bash launch.sh full up      # build + start the whole stack in podman
+bash launch.sh full down    # tear it down (named volumes preserved)
+```
+
+First run pulls the MySQL/Redis images and builds the small gearmand/PHP images
+(cached afterward, so steady-state startup stays fast). Stop the podman backing
+tier with `bash launch.sh stop --infra` (plain `stop` leaves it running, like
+system services).
+
 Test the stack you just launched ([docs/TESTING.md](docs/TESTING.md)):
 
 ```bash
@@ -85,9 +116,10 @@ Then open:
 of the ten widgets (text, textarea, email, number, select, radio, checkbox,
 date, star rating — plus a file-upload widget you can add in the builder).
 
-`launch.sh` also supports `stop`, `restart`, `status`, `logs <service>`, and
-`kill <service>` (services: `web1 web2 status worker-pdf worker-email
-worker-webhook otel nginx`).
+`launch.sh` also supports `stop` (`--infra` also stops the podman backing
+services), `restart`, `status`, `logs <service>`, `kill <service>` (services:
+`web1 web2 status worker-pdf worker-email worker-webhook otel nginx gearmand`),
+and `full up|down` (run the whole stack in podman).
 
 ## What you can do
 
