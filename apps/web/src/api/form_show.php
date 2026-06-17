@@ -18,6 +18,7 @@ api_json([
         'title' => (string) $form['title'],
         'description' => $form['description'] !== null ? (string) $form['description'] : null,
         'fields' => api_decode_fields((string) $form['fields']),
+        'conditions' => api_decode_fields((string) ($form['conditions'] ?? '')),
         'is_published' => (int) $form['is_published'] === 1,
         'webhook_url' => $form['webhook_url'] !== null ? (string) $form['webhook_url'] : null,
         'created_at' => (string) $form['created_at'],

@@ -5,6 +5,10 @@ declare(strict_types=1);
 $user = Auth::requireLogin();
 $form = owned_form($user, (int) $params['id']);
 
+if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'GET' && FrontendLoader::has('dashboard')) {
+    serve_spa('dashboard', $user);
+}
+
 if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
     $check = validate_settings_request($_POST);
     if (!$check['ok']) {

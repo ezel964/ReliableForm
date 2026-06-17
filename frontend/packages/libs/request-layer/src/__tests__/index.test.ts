@@ -30,16 +30,31 @@ describe('request-layer', () => {
     });
   });
 
-  it('sends the CSRF header on mutating calls but not GET', async () => {
+  it('sends the CSRF header on mutating calls but not GET (cookie mode)', async () => {
     const seen: Record<string, string>[] = [];
     const adapter = vi.fn(async (cfg: any) => {
       seen.push(cfg.headers);
       return { status: 200, data: { ok: true } };
     });
-    const r = new RequestLayer('/v1', { adapter });
+    const r = new RequestLayer('/v1', { adapter, apiKey: '' });
     await r.get('/me');
     await r.post('/forms', {});
     expect(seen[0]['X-CSRF-Token']).toBeUndefined();
     expect(seen[1]['X-CSRF-Token']).toBe('csrf-token');
+    expect(seen[1]['Authorization']).toBeUndefined();
+  });
+
+  it('sends Bearer auth and no CSRF when an apiKey is set', async () => {
+    const seen: Record<string, string>[] = [];
+    const adapter = vi.fn(async (cfg: any) => {
+      seen.push(cfg.headers);
+      return { status: 200, data: { ok: true } };
+    });
+    const r = new RequestLayer('/v1', { adapter, apiKey: 'deadbeef' });
+    await r.get('/forms');
+    await r.post('/forms', {});
+    expect(seen[0]['Authorization']).toBe('Bearer deadbeef');
+    expect(seen[1]['Authorization']).toBe('Bearer deadbeef');
+    expect(seen[1]['X-CSRF-Token']).toBeUndefined();
   });
 });

@@ -4,6 +4,10 @@ declare(strict_types=1);
 
 $user = Auth::requireLogin();
 
+if (FrontendLoader::has('dashboard')) {
+    serve_spa('dashboard', $user);
+}
+
 // API key for the "API access" card. Legacy edge: rows created before the
 // api_key column heal lazily — generate and persist one on first sight.
 $keyRow = DB::one('SELECT api_key FROM users WHERE id = ?', [(int) $user['id']]);

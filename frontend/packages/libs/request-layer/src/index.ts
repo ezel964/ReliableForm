@@ -1,18 +1,24 @@
 import axios from 'axios';
-import { getCsrf } from '@rf/router-bridge';
+import { getCsrf, getApiKey } from '@rf/router-bridge';
 import type { Adapter, ApiError } from './types';
 
 export type { ApiError } from './types';
 
 /**
- * Thin HTTP client around the /v1 API. Sends the session cookie
- * (withCredentials) and the CSRF token header on mutating calls, and unwraps
- * the { ok, ... } envelope — rejecting with a typed ApiError on { ok:false }.
+ * Thin HTTP client around the /v1 API. Two auth modes:
+ *  - apiKey (default when window.__rfrouter.API_KEY is present): sends
+ *    `Authorization: Bearer <key>` — the sessionless /v1 contract, no CSRF.
+ *  - cookie: sends the session cookie (withCredentials) + `X-CSRF-Token` on
+ *    mutating calls.
+ * Either way it unwraps the { ok, ... } envelope, rejecting with a typed
+ * ApiError on { ok:false }.
  */
 export class RequestLayer {
   private adapter: Adapter;
+  private apiKey: string;
 
-  constructor(private baseURL: string, opts?: { adapter?: Adapter }) {
+  constructor(private baseURL: string, opts?: { adapter?: Adapter; apiKey?: string }) {
+    this.apiKey = opts?.apiKey ?? getApiKey();
     this.adapter = opts?.adapter ?? this.axiosAdapter();
   }
 
@@ -35,7 +41,11 @@ export class RequestLayer {
 
   private headers(method: string): Record<string, string> {
     const h: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (method !== 'GET') h['X-CSRF-Token'] = getCsrf();
+    if (this.apiKey) {
+      h['Authorization'] = `Bearer ${this.apiKey}`;
+    } else if (method !== 'GET') {
+      h['X-CSRF-Token'] = getCsrf();
+    }
     return h;
   }
 

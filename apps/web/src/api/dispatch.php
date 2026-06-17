@@ -24,16 +24,32 @@ if ($path === '/v1/me') {
 } elseif ($path === '/v1/clientlog') {
     $apiHandlers = ['POST' => ['POST /v1/clientlog', 'clientlog']];
 } elseif ($path === '/v1/forms') {
-    $apiHandlers = ['GET' => ['GET /v1/forms', 'forms_index']];
+    $apiHandlers = [
+        'GET' => ['GET /v1/forms', 'forms_index'],
+        'POST' => ['POST /v1/forms', 'form_create'],
+    ];
 } elseif (preg_match('#^/v1/forms/([a-z0-9]{10})$#', $path, $m) === 1) {
     $params['public_id'] = $m[1];
-    $apiHandlers = ['GET' => ['GET /v1/forms/{public_id}', 'form_show']];
+    $apiHandlers = [
+        'GET' => ['GET /v1/forms/{public_id}', 'form_show'],
+        'PUT' => ['PUT /v1/forms/{public_id}', 'form_update'],
+        'DELETE' => ['DELETE /v1/forms/{public_id}', 'form_delete'],
+    ];
+} elseif (preg_match('#^/v1/forms/([a-z0-9]{10})/settings$#', $path, $m) === 1) {
+    $params['public_id'] = $m[1];
+    $apiHandlers = [
+        'GET' => ['GET /v1/forms/{public_id}/settings', 'form_settings_show'],
+        'PUT' => ['PUT /v1/forms/{public_id}/settings', 'form_settings_update'],
+    ];
 } elseif (preg_match('#^/v1/forms/([a-z0-9]{10})/submissions$#', $path, $m) === 1) {
     $params['public_id'] = $m[1];
     $apiHandlers = [
         'GET' => ['GET /v1/forms/{public_id}/submissions', 'submissions_index'],
         'POST' => ['POST /v1/forms/{public_id}/submissions', 'submission_create'],
     ];
+} elseif (preg_match('#^/v1/submissions/(\d+)$#', $path, $m) === 1) {
+    $params['id'] = $m[1];
+    $apiHandlers = ['GET' => ['GET /v1/submissions/{id}', 'submission_show']];
 }
 
 if ($apiHandlers === null) {

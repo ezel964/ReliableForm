@@ -5,6 +5,10 @@ declare(strict_types=1);
 $user = Auth::requireLogin();
 $form = owned_form($user, (int) $params['id']);
 
+if (FrontendLoader::has('dashboard')) {
+    serve_spa('dashboard', $user);
+}
+
 $perPage = 25;
 
 $q = $_GET['q'] ?? '';

@@ -5,6 +5,10 @@ declare(strict_types=1);
 $user = Auth::requireLogin();
 $submissionId = (int) $params['id'];
 
+if (FrontendLoader::has('dashboard')) {
+    serve_spa('dashboard', $user);
+}
+
 $submission = DB::one(
     'SELECT s.id, s.form_id, s.data, s.ip, s.user_agent, s.created_at,
             f.user_id AS owner_id, f.title AS form_title, f.fields AS form_fields, f.public_id

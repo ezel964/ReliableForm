@@ -1160,3 +1160,35 @@ body.embed-page .center-card { max-width: none; margin: 0; box-shadow: none; bor
   .spinner { animation: rf-spin 1.8s linear infinite !important; animation-iteration-count: infinite !important; }
   .stars label:hover { transform: none; }
 }
+
+/* --- React SPA supplements (dashboard + builder) ---------------------------
+   Small additions for class names the SPAs use that the server-rendered pages
+   didn't already define. Reuses the existing tokens/spacing. */
+.builder-card {
+  border: 1px solid var(--rf-border, #e2e5ec);
+  border-radius: 10px;
+  padding: 14px 16px;
+  background: #fff;
+}
+.builder-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.option-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 6px;
+}
+.option-row .input { flex: 1; }
+.condition-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.condition-row .input { width: auto; min-width: 120px; }
+.row-actions { display: inline-flex; gap: 12px; align-items: center; }
+.link-button.danger { color: #dc2626; }

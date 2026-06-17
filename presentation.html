@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>ReliableForm — Architecture & SRE/SLO</title>
+<title>ReliableForm — Architecture & SRE</title>
 <style>
   :root{
     --bg0:#05070c;
@@ -256,14 +256,14 @@
   <section class="slide active title-slide">
     <div class="brand">
       <div class="logo">R</div>
-      <span class="kicker" style="margin:0;">Architecture &amp; SRE / SLO Review</span>
+      <span class="kicker" style="margin:0;">Architecture &amp; SRE Review</span>
     </div>
     <h1>ReliableForm</h1>
-    <p class="lead mt">A JotForm-faithful runtime, rebuilt on one host as a controlled lab for our SLI/SLO stack — <span class="accent">production shape, measurable overhead, breakable on demand.</span></p>
+    <p class="lead mt">A JotForm-faithful runtime, rebuilt on one host as a controlled lab for our SLI stack — <span class="accent">production shape, measurable overhead, breakable on demand.</span></p>
     <div class="metarow">
       <div><div class="k">Topology</div><div class="v">LB · 2× web · async workers · queue · DB</div></div>
       <div><div class="k">Fidelity</div><div class="v">FPM · gearmand · MySQL sessions · React hybrid</div></div>
-      <div><div class="k">Focus</div><div class="v">Observability · SLIs · SLOs · Failure modes</div></div>
+      <div><div class="k">Focus</div><div class="v">Observability · SLIs · tracing · failure modes</div></div>
     </div>
   </section>
 
@@ -341,24 +341,50 @@
   <!-- 4 FRONTEND FIDELITY -->
   <section class="slide">
     <div class="kicker">Link to JotForm · frontend</div>
-    <h2>Hybrid / strangler frontend — JotForm's exact pattern</h2>
+    <h2>Hybrid frontend — React SPAs now <span class="accent">live</span></h2>
     <div class="grid g3 mt">
       <div class="card"><h3 class="cyan">Public forms → PHP</h3><p>Highest-traffic, lowest-trust surface stays server-rendered &amp; cacheable.</p></div>
-      <div class="card glow"><h3 class="accent">App surfaces → React SPA</h3><p>Dashboard &amp; builder bootstrapped by a PHP shell injecting <code class="inl">window.__rfrouter</code>.</p></div>
-      <div class="card"><h3 class="violet">Telemetry → every page</h3><p>Built bundle injected globally: RUM, JS-error capture, trace propagation.</p></div>
+      <div class="card glow"><h3 class="accent">Dashboard SPA → React</h3><p>react-router: forms list · paginated inbox · submission detail · settings. Reads a prefetched bootstrap, calls <code class="inl">/v1</code>.</p></div>
+      <div class="card glow"><h3 class="accent">Builder SPA → React</h3><p>Redux Toolkit store: 10 widgets, reorder, conditional logic — same <code class="inl">f_xxxxxx</code> field contract as the backend.</p></div>
     </div>
     <div class="two mt">
       <div class="card">
         <h3>Shared libs — pnpm · Rspack · TypeScript</h3>
         <table class="mt8">
-          <tr><td class="mono">@rf/router-bridge</td><td>reads <code class="inl">window.__rfrouter</code> (mirrors JotForm)</td></tr>
-          <tr><td class="mono">@rf/request-layer</td><td>axios + CSRF + typed <code class="inl">ApiError</code></td></tr>
+          <tr><td class="mono">@rf/router-bridge</td><td>reads <code class="inl">window.__rfrouter</code> + bootstrap (JotForm)</td></tr>
+          <tr><td class="mono">@rf/request-layer</td><td>Bearer key <i>or</i> cookie+CSRF · typed <code class="inl">ApiError</code></td></tr>
           <tr><td class="mono">@rf/telemetry</td><td>web-vitals · trace headers · error beacons</td></tr>
         </table>
       </div>
       <div class="card">
-        <h3>Additive by design</h3>
-        <p>The PHP app runs standalone. Telemetry injects only when <code class="inl">asset-manifest.json</code> exists — giving the browser SRE layer a <b>true zero-cost "off"</b> state, like every other layer.</p>
+        <h3>Telemetry on every surface</h3>
+        <p>The built bundle injects <b>first</b> on both PHP pages and SPA shells — RUM, JS-error capture, and trace propagation boot before the app. Injected only when the manifest exists: a <b>true zero-cost "off"</b>.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 5 STRANGLER MIGRATION -->
+  <section class="slide">
+    <div class="kicker">Link to JotForm · migration</div>
+    <h2>Strangler migration — <span class="accent">live &amp; reversible</span></h2>
+    <div class="two mt">
+      <div>
+        <p>Each authenticated route checks whether the React bundle is built and serves the SPA when it is — otherwise it falls back to the original PHP view. Both coexist; the migration flips per surface, reversibly.</p>
+        <pre class="mt">if (FrontendLoader::<span class="o">has</span>('dashboard')) {
+    <span class="b">serve_spa</span>('dashboard', $user);  <span class="c">// React shell</span>
+}
+<span class="c">// else → legacy PHP view renders</span></pre>
+        <div class="callout mt"><b>serve_spa()</b> injects the owner's API key (Bearer) + a prefetched <b>bootstrap JSON</b> blob — JotForm's JotFormLoader pattern, no first-paint API waterfall.</div>
+      </div>
+      <div class="card glow">
+        <h3 class="accent">/v1 CRUD now backs the SPAs</h3>
+        <table class="mt8">
+          <tr><td class="mono">POST /v1/forms</td><td>create</td></tr>
+          <tr><td class="mono">PUT · DELETE /v1/forms/{id}</td><td>update · delete</td></tr>
+          <tr><td class="mono">GET · PUT …/settings</td><td>publish · limit · autoresponder</td></tr>
+          <tr><td class="mono">GET /v1/submissions/{id}</td><td>detail</td></tr>
+        </table>
+        <p class="mt8">The API reuses the <b>same validators</b> as the PHP builder — identical rules on both paths, mirroring JotForm's server-side ConditionEngine.</p>
       </div>
     </div>
   </section>
@@ -456,7 +482,7 @@
 
   <!-- 9 SLIs -->
   <section class="slide">
-    <div class="kicker">SLIs</div>
+    <div class="kicker">SLIs · signals we collect</div>
     <h2>What we measure — and where it comes from</h2>
     <div class="card fill" style="padding:6px 10px;">
       <table>
@@ -467,6 +493,7 @@
           <tr><td>Job success rate</td><td>workers</td><td><span class="mono">worker.pdf.done</span> vs <span class="mono">.failed</span> (+ email/webhook)</td></tr>
           <tr><td>Worker freshness</td><td>workers</td><td><span class="mono">heartbeat:worker-*</span> absent ⇒ down · queue depth</td></tr>
           <tr><td>Webhook delivery success</td><td>worker-webhook</td><td><span class="mono">worker.webhook.delivered</span> vs <span class="mono">.failed</span></td></tr>
+          <tr><td>Browser Core Web Vitals</td><td>frontend (RUM)</td><td><span class="mono">web.client.lcp|inp|cls|ttfb</span> via /v1/rum</td></tr>
           <tr><td>E2E submission → delivered</td><td>cross-service</td><td>SERVER span → CLIENT span, joined by <span class="mono">trace_id</span></td></tr>
           <tr><td>Telemetry pipeline health</td><td>otel sidecar</td><td><span class="mono">otel.spans_exported</span> vs <span class="mono">.spans_dropped</span></td></tr>
         </tbody>
@@ -475,27 +502,9 @@
     <div class="callout">Design choice for review: prefer LB-side <span style="color:#fff;font-family:var(--mono);font-size:.85em;">$status</span> for availability — it captures nginx-generated 502s the app never saw.</div>
   </section>
 
-  <!-- 10 SLOs -->
-  <section class="slide">
-    <div class="kicker">SLOs</div>
-    <h2>Initial targets — frontend &amp; backend</h2>
-    <div class="grid g4 mt">
-      <div class="slo"><div class="v">&lt;2.5s</div><div class="k">LCP p75</div><div class="s">Largest Contentful Paint</div></div>
-      <div class="slo"><div class="v">&lt;200ms</div><div class="k">INP p75</div><div class="s">Interaction to Next Paint</div></div>
-      <div class="slo"><div class="v">&lt;0.1</div><div class="k">CLS p75</div><div class="s">Cumulative Layout Shift</div></div>
-      <div class="slo"><div class="v">&lt;800ms</div><div class="k">TTFB p75</div><div class="s">Time To First Byte</div></div>
-    </div>
-    <div class="grid g3 mt" style="margin-top:18px;">
-      <div class="slo"><div class="v">&lt;1%</div><div class="k">JS error rate</div><div class="s">of sessions</div></div>
-      <div class="slo"><div class="v">&gt;99%</div><div class="k">Submit success</div><div class="s">public form, browser-observed</div></div>
-      <div class="slo"><div class="v">&gt;99.5%</div><div class="k">Builder save success</div><div class="s">authenticated surface</div></div>
-    </div>
-    <p class="mt" style="margin-top:18px;">Browser SLIs come from the layer that's blind to server metrics; browser→backend traces join via <code class="inl">traceparent</code>, so a slow client API call follows straight into the server span.</p>
-  </section>
-
   <!-- 11 OVERHEAD A/B -->
   <section class="slide">
-    <div class="kicker">The research goal</div>
+    <div class="kicker">Measuring overhead</div>
     <h2>Overhead A/B — <span class="accent">what does instrumentation cost?</span></h2>
     <div class="two mt">
       <div>
@@ -574,7 +583,7 @@
   <!-- chrome -->
   <div class="progress" id="progress"></div>
   <div class="chrome">
-    <div class="l"><span class="dot"></span><b style="color:#dbe3ef;">ReliableForm</b> · Architecture &amp; SRE/SLO</div>
+    <div class="l"><span class="dot"></span><b style="color:#dbe3ef;">ReliableForm</b> · Architecture &amp; SRE</div>
     <div id="counter">1 / 14</div>
   </div>
 </div>

@@ -158,6 +158,92 @@ function api_decode_fields(string $json): array
 }
 
 /**
+ * Require an application/json request body, else 415. Returns the decoded body
+ * as an array (422 when it is not a JSON object). Mirrors submission_create.php.
+ *
+ * @return array<string, mixed>
+ */
+function api_json_body(): array
+{
+    $contentType = (string) ($_SERVER['CONTENT_TYPE'] ?? $_SERVER['HTTP_CONTENT_TYPE'] ?? '');
+    $mediaType = strtolower(trim(explode(';', $contentType, 2)[0]));
+    if ($mediaType !== 'application/json') {
+        api_error('unsupported_media_type', 'Content-Type must be application/json.', 415);
+    }
+    $body = json_decode((string) file_get_contents('php://input'), true);
+    if (!is_array($body)) {
+        api_error('validation_failed', 'Body must be a valid JSON object.', 422);
+    }
+    return $body;
+}
+
+/**
+ * Adapt a JSON builder body ({title, description, webhook_url, fields:[...]})
+ * into the $_POST shape validate_builder_request() expects (fields as a JSON
+ * string). Pure — no I/O. Non-string scalars are left for the validator to
+ * reject, exactly as a raw form post would.
+ *
+ * @param array<string, mixed> $body
+ * @return array<string, mixed>
+ */
+function api_builder_post_from_body(array $body): array
+{
+    return [
+        'title' => $body['title'] ?? '',
+        'description' => $body['description'] ?? '',
+        'webhook_url' => $body['webhook_url'] ?? '',
+        'fields_json' => array_key_exists('fields', $body)
+            ? (string) json_encode($body['fields'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
+            : '',
+    ];
+}
+
+/**
+ * Adapt a JSON settings body into the $_POST shape validate_settings_request()
+ * expects (submission_limit as a string; checkboxes as truthy). Pure.
+ *
+ * @param array<string, mixed> $body
+ * @return array<string, mixed>
+ */
+function api_settings_post_from_body(array $body): array
+{
+    $limit = $body['submission_limit'] ?? '';
+    if (is_int($limit)) {
+        $limit = (string) $limit;
+    }
+    $message = $body['thankyou_message'] ?? '';
+    return [
+        'is_published' => !empty($body['is_published']) ? '1' : '',
+        'submission_limit' => is_string($limit) ? $limit : '',
+        'thankyou_message' => is_string($message) ? $message : '',
+        'autoresponder_enabled' => !empty($body['autoresponder_enabled']) ? '1' : '',
+    ];
+}
+
+/**
+ * Shape a forms row for JSON output (the create/update endpoints reuse this so
+ * their response matches GET /v1/forms/{public_id}, incl. conditions).
+ *
+ * @param array<string, mixed> $form
+ * @return array<string, mixed>
+ */
+function api_form_payload(array $form): array
+{
+    return [
+        'id' => (int) $form['id'],
+        'public_id' => (string) $form['public_id'],
+        'title' => (string) $form['title'],
+        'description' => $form['description'] !== null ? (string) $form['description'] : null,
+        'fields' => api_decode_fields((string) $form['fields']),
+        'conditions' => api_decode_fields((string) ($form['conditions'] ?? '')),
+        'is_published' => (int) $form['is_published'] === 1,
+        'webhook_url' => $form['webhook_url'] !== null ? (string) $form['webhook_url'] : null,
+        'created_at' => (string) $form['created_at'],
+        'updated_at' => (string) $form['updated_at'],
+    ];
+}
+
+/**
  * Frontend SRE — pure helpers (no I/O, unit-testable).
  * The browser ships Core Web Vitals to POST /v1/rum and JS errors to
  * POST /v1/clientlog; both are sessionless beacons that sink into the existing

@@ -1,0 +1,26 @@
+{
+  "name": "@rf/builder",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "build": "rspack build",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "@reduxjs/toolkit": "^2.2.0",
+    "react-redux": "^9.1.0",
+    "@rf/request-layer": "workspace:*",
+    "@rf/router-bridge": "workspace:*"
+  },
+  "devDependencies": {
+    "@rspack/cli": "^1.1.0",
+    "@rspack/core": "^1.1.0",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.1.0"
+  }
+}

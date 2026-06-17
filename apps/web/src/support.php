@@ -53,6 +53,32 @@ function render_page(string $view, array $vars = [], int $status = 200): void
     ]);
 }
 
+/**
+ * Serve a React SPA shell for the logged-in owner: inject the owner's API key
+ * (the SPA calls the sessionless /v1 API as Bearer) plus a bootstrap blob with
+ * the current user and any prefetched data. Used by the dashboard/builder
+ * routes when the bundle is built; callers fall back to the legacy PHP view
+ * otherwise (FrontendLoader::has()).
+ *
+ * @param array<string, mixed> $user
+ * @param array<string, mixed> $bootstrap
+ */
+function serve_spa(string $app, array $user, array $bootstrap = []): never
+{
+    $row = DB::one('SELECT api_key FROM users WHERE id = ?', [(int) $user['id']]);
+    $bootstrap['user'] = [
+        'id' => (int) $user['id'],
+        'email' => (string) $user['email'],
+        'name' => (string) $user['name'],
+    ];
+    echo FrontendLoader::render($app, [
+        'apiKey' => (string) ($row['api_key'] ?? ''),
+        'bootstrap' => $bootstrap,
+        'title' => 'ReliableForm',
+    ]);
+    exit;
+}
+
 /** Friendly 404 page. */
 function not_found(string $message = "We couldn't find that page."): never
 {
