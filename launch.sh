@@ -99,13 +99,13 @@ WEB_RUNTIME_CFG="${WEB_RUNTIME:-}"
 QUEUE_DRIVER_CFG="${QUEUE_DRIVER:-}"
 [ -z "$QUEUE_DRIVER_CFG" ] && QUEUE_DRIVER_CFG="$(env_get QUEUE_DRIVER auto)"
 
-# Backing-service runtime (INFRA_RUNTIME=auto|podman|host, env var overrides
+# Backing-service runtime (INFRA_RUNTIME=podman|auto|host, env var overrides
 # .env): podman runs MySQL/Redis/gearmand from config/podman/compose.yaml;
 # host uses the system-installed services (brew/systemctl). auto prefers
 # podman when it is usable, else falls back to host with a loud red-box
 # warning. Docker is forbidden — only `podman compose` is ever used.
 INFRA_RUNTIME_CFG="${INFRA_RUNTIME:-}"
-[ -z "$INFRA_RUNTIME_CFG" ] && INFRA_RUNTIME_CFG="$(env_get INFRA_RUNTIME auto)"
+[ -z "$INFRA_RUNTIME_CFG" ] && INFRA_RUNTIME_CFG="$(env_get INFRA_RUNTIME podman)"
 
 # ---------------------------------------------------------------------------
 # Web runtime resolution (WEB_RUNTIME: auto|fpm|cli)
@@ -198,7 +198,7 @@ find_gearmand() {
 }
 
 # Infra mode resolution (INFRA_RUNTIME: auto|podman|host). This is the
-# NON-PROMPTING resolution used by status/stop/logs; cmd_start re-runs the
+# NON-PROMPTING resolution used for start/restart; cmd_start re-runs the
 # decision through ensure_infra() which may prompt to start the podman
 # machine and shows the red-box warning when podman is expected but missing.
 INFRA_MODE=""
@@ -210,7 +210,23 @@ resolve_infra_mode_quiet() {
         *)           INFRA_MODE="host" ;;
     esac
 }
-resolve_infra_mode_quiet
+
+# Mode the RUNNING stack actually uses, for status/stop/logs/kill: the marker
+# cmd_start writes wins (so we know it was podman even if the macOS machine was
+# later stopped — `podman_usable` alone would wrongly say "host"). Falls back
+# to a cheap resolution only when no marker exists (stack never started).
+effective_infra_mode() {
+    local m=""
+    if [ -f "$RUN_DIR/infra-mode" ]; then
+        m="$(tr -d '[:space:]' < "$RUN_DIR/infra-mode" 2>/dev/null)"
+    fi
+    case "$m" in
+        podman|host) printf '%s' "$m"; return 0 ;;
+    esac
+    if [ "$INFRA_RUNTIME_CFG" = "host" ]; then printf 'host'; return 0; fi
+    if [ "$INFRA_RUNTIME_CFG" = "podman" ]; then printf 'podman'; return 0; fi
+    if podman_usable; then printf 'podman'; else printf 'host'; fi
+}
 
 # QUEUE_DRIVER is resolved ONCE and exported to every service started below,
 # so web and workers can never disagree mid-run. auto picks gearman when a
@@ -235,7 +251,21 @@ resolve_queue_driver() {
             ;;
     esac
 }
-resolve_queue_driver
+
+# Resolve infra + queue once, gated by command. start/restart need the live
+# (possibly machine-starting) decision and the gearmand binary probe;
+# inspection commands (status/stop/logs/kill) read the cheap markers instead,
+# avoiding a `podman info` round-trip and the brew-prefix probe on every call.
+QUEUE_DRIVER_RESOLVED=""
+case "$CMD" in
+    start|restart)
+        resolve_infra_mode_quiet
+        resolve_queue_driver
+        ;;
+    *)
+        INFRA_MODE="$(effective_infra_mode)"
+        ;;
+esac
 
 # Driver the RUNNING stack actually uses: the marker cmd_start writes wins
 # (the status service and tests read the same file); fresh resolution is the
@@ -578,8 +608,9 @@ wait_http_ready() { # $1 url, $2 budget-seconds → echoes last code; 0 iff 200
 }
 
 heartbeat_value() { # $1 service → echoes heartbeat:<name> value ("" if absent)
-    have redis-cli || return 0
-    redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" GET "heartbeat:$1" 2>/dev/null
+    # redis_cli (scripts/podman.sh) falls back to `podman exec rf-redis` when
+    # no host redis-cli exists, so heartbeats work in podman mode regardless.
+    redis_cli GET "heartbeat:$1" 2>/dev/null
 }
 
 wait_worker_ready() { # $1 name, $2 budget-seconds → 0 ready / 1 not
@@ -767,13 +798,13 @@ cmd_start() {
 
     # Redis is required: sessions, queues and heartbeats live there.
     if [ "$INFRA_MODE" = "podman" ]; then
-        # The container is already coming up (infra_up). Give it a moment to
-        # accept connections, then confirm with the same probe host mode uses.
-        infra_wait_healthy redis 30 >/dev/null 2>&1 || true
-        if redis_running; then
+        # The container's own healthcheck (redis-cli ping INSIDE the container)
+        # is the source of truth — this needs no host redis-cli. redis_running
+        # (host client, or `podman exec` fallback) is a best-effort extra.
+        if infra_wait_healthy redis 30 || redis_running; then
             ok "Redis is running ($REDIS_HOST:$REDIS_PORT, container rf-redis)"
         else
-            err "Redis container did not become reachable on $REDIS_HOST:$REDIS_PORT — check: podman logs rf-redis"
+            err "Redis container did not become healthy on $REDIS_HOST:$REDIS_PORT — check: podman logs rf-redis"
             exit 1
         fi
     elif redis_running; then
@@ -873,6 +904,7 @@ cmd_start() {
     # alone can't tell them what an already-running stack was started with.
     printf '%s\n' "$WEB_MODE" > "$RUN_DIR/web-runtime"
     printf '%s\n' "$QUEUE_DRIVER_RESOLVED" > "$RUN_DIR/queue-driver"
+    printf '%s\n' "$INFRA_MODE" > "$RUN_DIR/infra-mode"
 
     # --- start everything -------------------------------------------------
     # gearmand first: the workers register with it as soon as they boot. In
@@ -1035,11 +1067,14 @@ cmd_kill() { # chaos drill: take one service down, whole process tree
             usage; exit 1
             ;;
     esac
-    # In podman mode gearmand is a container, not a host process — chaos-kill
-    # it with `podman kill` so the queue-outage drill still works.
+    # In podman mode gearmand is a container, not a host process. Use
+    # `podman stop` (NOT `podman kill`): the container has restart=unless-stopped,
+    # so a plain kill would be auto-restarted and the drill would be a no-op.
+    # `podman stop -t 0` is abrupt (immediate SIGKILL) AND marks the container
+    # user-stopped, so it stays down until `launch.sh start` (infra_up) revives it.
     if [ "$name" = "gearmand" ] && [ "$INFRA_MODE" = "podman" ]; then
         if infra_container_running gearmand; then
-            podman kill rf-gearmand >/dev/null 2>&1
+            podman stop -t 0 rf-gearmand >/dev/null 2>&1
             ok "gearmand container (rf-gearmand) is down. Watch http://localhost:$LB_PORT/status react."
             info "bring it back with: bash launch.sh start"
         else

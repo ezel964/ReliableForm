@@ -22,7 +22,11 @@ services:
     container_name: rf-mysql
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpass}
+      # The app never uses root — only DB_USER/DB_PASS. Generate a throwaway
+      # random root password so no secret is committed. (Need root? Reset it
+      # with: podman exec -it rf-mysql mysql ... as the random root, or recreate
+      # the volume.)
+      MYSQL_RANDOM_ROOT_PASSWORD: "yes"
       MYSQL_DATABASE: ${DB_NAME:-reliableform}
       MYSQL_USER: ${DB_USER:-reliableform}
       MYSQL_PASSWORD: ${DB_PASS:-reliableform}

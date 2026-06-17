@@ -259,11 +259,11 @@
       <span class="kicker" style="margin:0;">Architecture &amp; SRE Review</span>
     </div>
     <h1>ReliableForm</h1>
-    <p class="lead mt">A JotForm-faithful runtime, rebuilt on one host as a controlled lab for our SLI stack — <span class="accent">production shape, measurable overhead, breakable on demand.</span></p>
+    <p class="lead mt">A working JotForm-style stack, rebuilt on one host — <span class="accent">the same production shape and patterns, end to end.</span></p>
     <div class="metarow">
       <div><div class="k">Topology</div><div class="v">LB · 2× web · async workers · queue · DB</div></div>
-      <div><div class="k">Fidelity</div><div class="v">FPM · gearmand · MySQL sessions · React hybrid</div></div>
-      <div><div class="k">Focus</div><div class="v">Observability · SLIs · tracing · failure modes</div></div>
+      <div><div class="k">Stack</div><div class="v">FPM · gearmand · MySQL · Redis · React hybrid</div></div>
+      <div><div class="k">Built in</div><div class="v">PHP · Node · TypeScript</div></div>
     </div>
   </section>
 
@@ -321,21 +321,21 @@
   <!-- 3 JOTFORM LINKAGE -->
   <section class="slide">
     <div class="kicker">Link to JotForm</div>
-    <h2>Same runtime <span class="accent">shape</span> as production — component for component</h2>
+    <h2>We mirror the production <span class="accent">shape</span> — at lab scale</h2>
     <div class="map-head">
-      <div class="h prod">JotForm — production reference</div>
+      <div class="h prod">JotForm — production</div>
       <div></div>
-      <div class="h repl">ReliableForm — replica</div>
+      <div class="h repl">ReliableForm — what we built</div>
     </div>
     <div class="fill">
-      <div class="maprow"><div class="side left">Edge LB → web fleet</div><div class="arrowcell">→</div><div class="side right">Nginx <span class="mono">least_conn</span> → web1/web2, max_fails ejection</div></div>
-      <div class="maprow"><div class="side left"><b>PHP-FPM</b> web pools</div><div class="arrowcell">→</div><div class="side right">2 FPM masters + FastCGI <span class="mono">(WEB_RUNTIME=fpm)</span></div></div>
-      <div class="maprow"><div class="side left"><b>gearmand</b> + CLI Gearman workers</div><div class="arrowcell">→</div><div class="side right"><span class="mono">GearmanLite.php</span> + CLI workers, Redis fallback</div></div>
-      <div class="maprow"><div class="side left"><b>MySQL sessions</b>; Redis = cache only</div><div class="arrowcell">→</div><div class="side right"><span class="mono">SESSION_DRIVER=mysql</span>; Redis cache/limits</div></div>
-      <div class="maprow"><div class="side left"><b>FrontendLoader</b> + router-bridge SPAs</div><div class="arrowcell">→</div><div class="side right"><span class="mono">FrontendLoader.php</span> → <span class="mono">window.__rfrouter</span></div></div>
-      <div class="maprow"><div class="side left"><b>JF-Trace-Parent-ID</b> propagation</div><div class="arrowcell">→</div><div class="side right">W3C <span class="mono">traceparent</span> adopted by <span class="mono">Trace.php</span></div></div>
+      <div class="maprow"><div class="side left">Edge LB → web fleet</div><div class="arrowcell">→</div><div class="side right">Nginx <span class="mono">least_conn</span> → web1/web2</div></div>
+      <div class="maprow"><div class="side left"><b>PHP-FPM</b> web pools</div><div class="arrowcell">→</div><div class="side right">2 FPM masters + FastCGI</div></div>
+      <div class="maprow"><div class="side left"><b>gearmand</b> + CLI workers</div><div class="arrowcell">→</div><div class="side right"><span class="mono">GearmanLite.php</span> + CLI workers</div></div>
+      <div class="maprow"><div class="side left">Server-side sessions; Redis = cache</div><div class="arrowcell">→</div><div class="side right">MySQL sessions; Redis cache/limits</div></div>
+      <div class="maprow"><div class="side left"><b>FrontendLoader</b> + router-bridge SPAs</div><div class="arrowcell">→</div><div class="side right"><span class="mono">FrontendLoader.php</span> → <span class="mono">__rfrouter</span></div></div>
+      <div class="maprow"><div class="side left"><b>JF-Trace-Parent-ID</b> propagation</div><div class="arrowcell">→</div><div class="side right">W3C <span class="mono">traceparent</span> via <span class="mono">Trace.php</span></div></div>
     </div>
-    <div class="callout">Every layer mirrors a real component — with a <b>fallback</b> so the stack still boots anywhere. Validated here, the SLIs transfer to prod.</div>
+    <div class="callout">We match the <b>shape</b>, not every wire-level detail — sessions, API envelope and trace header are simplified on purpose. JotForm is huge; this is a faithful lab replica.</div>
   </section>
 
   <!-- 4 FRONTEND FIDELITY -->
@@ -343,48 +343,18 @@
     <div class="kicker">Link to JotForm · frontend</div>
     <h2>Hybrid frontend — React SPAs now <span class="accent">live</span></h2>
     <div class="grid g3 mt">
-      <div class="card"><h3 class="cyan">Public forms → PHP</h3><p>Highest-traffic, lowest-trust surface stays server-rendered &amp; cacheable.</p></div>
-      <div class="card glow"><h3 class="accent">Dashboard SPA → React</h3><p>react-router: forms list · paginated inbox · submission detail · settings. Reads a prefetched bootstrap, calls <code class="inl">/v1</code>.</p></div>
-      <div class="card glow"><h3 class="accent">Builder SPA → React</h3><p>Redux Toolkit store: 10 widgets, reorder, conditional logic — same <code class="inl">f_xxxxxx</code> field contract as the backend.</p></div>
+      <div class="card"><h3 class="cyan">Public forms → PHP</h3><p>Server-rendered &amp; cacheable.</p></div>
+      <div class="card glow"><h3 class="accent">Dashboard SPA → React</h3><p>react-router: forms · inbox · detail · settings.</p></div>
+      <div class="card glow"><h3 class="accent">Builder SPA → React</h3><p>Redux Toolkit: 10 widgets, reorder, conditions.</p></div>
     </div>
-    <div class="two mt">
+    <div class="grid g2 mt">
       <div class="card">
-        <h3>Shared libs — pnpm · Rspack · TypeScript</h3>
-        <table class="mt8">
-          <tr><td class="mono">@rf/router-bridge</td><td>reads <code class="inl">window.__rfrouter</code> + bootstrap (JotForm)</td></tr>
-          <tr><td class="mono">@rf/request-layer</td><td>Bearer key <i>or</i> cookie+CSRF · typed <code class="inl">ApiError</code></td></tr>
-          <tr><td class="mono">@rf/telemetry</td><td>web-vitals · trace headers · error beacons</td></tr>
-        </table>
+        <h3 class="accent">Bootstrapped like JotForm</h3>
+        <p>A PHP shell hands the React app its config and prefetched data, and the app talks to the same REST API the public forms use.</p>
       </div>
       <div class="card">
-        <h3>Telemetry on every surface</h3>
-        <p>The built bundle injects <b>first</b> on both PHP pages and SPA shells — RUM, JS-error capture, and trace propagation boot before the app. Injected only when the manifest exists: a <b>true zero-cost "off"</b>.</p>
-      </div>
-    </div>
-  </section>
-
-  <!-- 5 STRANGLER MIGRATION -->
-  <section class="slide">
-    <div class="kicker">Link to JotForm · migration</div>
-    <h2>Strangler migration — <span class="accent">live &amp; reversible</span></h2>
-    <div class="two mt">
-      <div>
-        <p>Each authenticated route checks whether the React bundle is built and serves the SPA when it is — otherwise it falls back to the original PHP view. Both coexist; the migration flips per surface, reversibly.</p>
-        <pre class="mt">if (FrontendLoader::<span class="o">has</span>('dashboard')) {
-    <span class="b">serve_spa</span>('dashboard', $user);  <span class="c">// React shell</span>
-}
-<span class="c">// else → legacy PHP view renders</span></pre>
-        <div class="callout mt"><b>serve_spa()</b> injects the owner's API key (Bearer) + a prefetched <b>bootstrap JSON</b> blob — JotForm's JotFormLoader pattern, no first-paint API waterfall.</div>
-      </div>
-      <div class="card glow">
-        <h3 class="accent">/v1 CRUD now backs the SPAs</h3>
-        <table class="mt8">
-          <tr><td class="mono">POST /v1/forms</td><td>create</td></tr>
-          <tr><td class="mono">PUT · DELETE /v1/forms/{id}</td><td>update · delete</td></tr>
-          <tr><td class="mono">GET · PUT …/settings</td><td>publish · limit · autoresponder</td></tr>
-          <tr><td class="mono">GET /v1/submissions/{id}</td><td>detail</td></tr>
-        </table>
-        <p class="mt8">The API reuses the <b>same validators</b> as the PHP builder — identical rules on both paths, mirroring JotForm's server-side ConditionEngine.</p>
+        <h3 class="accent">Telemetry on every surface</h3>
+        <p>Both the PHP pages and the React apps carry the same performance + error reporting — added only when built, so the app still runs without it.</p>
       </div>
     </div>
   </section>
@@ -405,8 +375,8 @@
       <div class="step async"><div class="n">5</div><div class="t">Thanks (302)</div><div class="d">user never waits</div></div>
     </div>
     <div class="grid g2 mt" style="margin-top:26px;">
-      <div class="card"><h3>Why durable-first</h3><p>One transaction writes the submission + all <code class="inl">pending</code> job rows; enqueue happens <b>only after commit</b>. A worker can never see a job before its row exists.</p></div>
-      <div class="card"><h3>Graceful degradation</h3><p>If post-commit Redis work fails, the submission still succeeds — flash a warning, bump <code class="inl">web.submission.redis_degraded</code>. The user never eats an infra failure.</p></div>
+      <div class="card"><h3>Why durable-first</h3><p>One transaction writes the submission + all <code class="inl">pending</code> job rows; enqueue happens only after commit — a worker never sees a job before its row exists.</p></div>
+      <div class="card"><h3>Graceful degradation</h3><p>If post-commit Redis work fails, the submission still succeeds — the user never eats an infra failure.</p></div>
     </div>
   </section>
 
@@ -417,11 +387,11 @@
     <div class="two mt">
       <div>
         <ul>
-          <li><b>Long-running PHP CLI loops</b><span class="sub"> — pdf / email / webhook, shared <code class="inl">WorkerLoop</code> over BLPOP or GRAB_JOB.</span></li>
-          <li><b>Idempotent</b><span class="sub"> — re-running a <code class="inl">done</code> job is a no-op; <code class="inl">submission_id</code> is UNIQUE.</span></li>
-          <li><b>Retry with backoff</b><span class="sub"> — 3 attempts, <code class="inl">min(2^n,8)</code>s, heartbeat kept alive through sleeps.</span></li>
-          <li><b>Dead-letter</b><span class="sub"> — after 3 fails → <code class="inl">queue:dead</code> (always Redis, always inspectable).</span></li>
-          <li><b>Graceful shutdown</b><span class="sub"> — SIGTERM finishes the current job, exits 0.</span></li>
+          <li><b>Long-running PHP CLI loops</b><span class="sub"> — pdf / email / webhook.</span></li>
+          <li><b>Idempotent</b><span class="sub"> — re-running a <code class="inl">done</code> job is a no-op.</span></li>
+          <li><b>Retry with backoff</b><span class="sub"> — 3 attempts, then dead-letter.</span></li>
+          <li><b>Dead-letter</b><span class="sub"> — <code class="inl">queue:dead</code>, always inspectable.</span></li>
+          <li><b>Graceful shutdown</b><span class="sub"> — SIGTERM finishes the job, exits 0.</span></li>
         </ul>
         <div class="mt8">
           <span class="tag">queue:pdf → rf_pdf</span>
@@ -431,7 +401,7 @@
       </div>
       <div class="card glow">
         <h3 class="accent">gearmand ↔ redis fallback</h3>
-        <p>Kill gearmand → submissions still commit; <code class="inl">Queue::push()</code> falls back to Redis lists at push time (<code class="inl">queue.driver_fallback</code>). Workers drain the fallback via BLPOP until gearmand returns, then re-register.</p>
+        <p>Kill gearmand → submissions still commit; pushes fall back to Redis lists, and workers drain them until gearmand returns.</p>
         <div class="callout mt">Nothing stuck, nothing lost — <b>no user-facing degradation.</b></div>
       </div>
     </div>
@@ -441,7 +411,7 @@
   <section class="slide">
     <div class="kicker">Observability</div>
     <h2>Three layers — <span class="accent">each independently toggleable</span></h2>
-    <p class="mt8" style="margin-bottom:14px;">That switchability is the experiment apparatus: it lets us isolate the cost of every layer.</p>
+    <p class="mt8" style="margin-bottom:14px;">Switch any off from <code class="inl">.env</code> — the stack runs lean or fully instrumented.</p>
     <div class="grid fill" style="gap:11px;align-content:center;">
       <div class="layer"><div class="lic" style="background:rgba(249,115,22,.14);color:var(--accent2);"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 17l5-6 4 4 5-7 4 5"/></svg></div>
         <div class="body"><div class="name">StatsD metrics</div><div class="desc">UDP counters/timings, <code class="inl">reliableform.*</code> — request, job, queue, client web-vitals</div></div>
@@ -459,79 +429,32 @@
     <div class="callout">Apps never export over HTTP themselves — only the <b>otel sidecar</b> talks to a collector, so exporter cost never pollutes request-path latency.</div>
   </section>
 
-  <!-- 8 TRACE WATERFALL -->
+  <!-- 8 TRACING -->
   <section class="slide">
-    <div class="kicker">Trace model</div>
-    <h2>One W3C trace — <span class="accent">browser → workers → receiver</span>, no SDK</h2>
-    <div class="card fill" style="display:flex;flex-direction:column;justify-content:center;">
-      <div class="wf">
-        <div class="wfrow"><div class="wflabel"><span class="knd server">SERVER</span><span class="nm">POST /v1/forms/{id}/submissions</span></div><div class="wftrack"><div class="wfbar server" style="left:0;width:100%;"></div></div></div>
-        <div class="wfrow"><div class="wflabel"><span class="knd consumer">CONSUMER</span><span class="nm">queue:pdf process</span></div><div class="wftrack"><div class="wfbar consumer" style="left:22%;width:13%;"></div></div></div>
-        <div class="wfrow"><div class="wflabel"><span class="knd consumer">CONSUMER</span><span class="nm">queue:email process</span></div><div class="wftrack"><div class="wfbar consumer" style="left:24%;width:16%;"></div></div></div>
-        <div class="wfrow"><div class="wflabel"><span class="knd consumer">CONSUMER</span><span class="nm">queue:webhook process</span></div><div class="wftrack"><div class="wfbar consumer" style="left:27%;width:34%;"></div></div></div>
-        <div class="wfrow"><div class="wflabel" style="padding-left:18px;"><span class="knd client">CLIENT</span><span class="nm">webhook deliver (per attempt)</span></div><div class="wftrack"><div class="wfbar client" style="left:31%;width:18%;"></div></div></div>
-        <div class="wfrow"><div class="wflabel" style="padding-left:36px;"><span class="knd recv">RECEIVER</span><span class="nm">traceparent → receiver spans</span></div><div class="wftrack"><div class="wfbar recv" style="left:40%;width:14%;"></div></div></div>
-      </div>
-    </div>
-    <div class="grid g3 mt">
-      <div class="card"><p>Incoming <code class="inl">traceparent</code> adopted; every response carries <code class="inl">X-Trace-Id</code>.</p></div>
-      <div class="card"><p><code class="inl">Queue::push()</code> embeds context → worker resumes the same trace.</p></div>
-      <div class="card"><p>Webhook POST forwards <code class="inl">traceparent</code> — the trace <b>leaves the stack.</b></p></div>
-    </div>
-  </section>
-
-  <!-- 9 SLIs -->
-  <section class="slide">
-    <div class="kicker">SLIs · signals we collect</div>
-    <h2>What we measure — and where it comes from</h2>
-    <div class="card fill" style="padding:6px 10px;">
-      <table>
-        <thead><tr><th>SLI</th><th>Service</th><th>Source</th></tr></thead>
-        <tbody>
-          <tr><td>Availability (non-5xx)</td><td>web / API</td><td>nginx <span class="mono">$status</span> · <span class="mono">web.status.* / api.status.*</span></td></tr>
-          <tr><td>Request latency</td><td>web / API</td><td><span class="mono">web.request_ms</span> · nginx <span class="mono">rt=</span> p50/p90/p99</td></tr>
-          <tr><td>Job success rate</td><td>workers</td><td><span class="mono">worker.pdf.done</span> vs <span class="mono">.failed</span> (+ email/webhook)</td></tr>
-          <tr><td>Worker freshness</td><td>workers</td><td><span class="mono">heartbeat:worker-*</span> absent ⇒ down · queue depth</td></tr>
-          <tr><td>Webhook delivery success</td><td>worker-webhook</td><td><span class="mono">worker.webhook.delivered</span> vs <span class="mono">.failed</span></td></tr>
-          <tr><td>Browser Core Web Vitals</td><td>frontend (RUM)</td><td><span class="mono">web.client.lcp|inp|cls|ttfb</span> via /v1/rum</td></tr>
-          <tr><td>E2E submission → delivered</td><td>cross-service</td><td>SERVER span → CLIENT span, joined by <span class="mono">trace_id</span></td></tr>
-          <tr><td>Telemetry pipeline health</td><td>otel sidecar</td><td><span class="mono">otel.spans_exported</span> vs <span class="mono">.spans_dropped</span></td></tr>
-        </tbody>
-      </table>
-    </div>
-    <div class="callout">Design choice for review: prefer LB-side <span style="color:#fff;font-family:var(--mono);font-size:.85em;">$status</span> for availability — it captures nginx-generated 502s the app never saw.</div>
-  </section>
-
-  <!-- 11 OVERHEAD A/B -->
-  <section class="slide">
-    <div class="kicker">Measuring overhead</div>
-    <h2>Overhead A/B — <span class="accent">what does instrumentation cost?</span></h2>
-    <div class="two mt">
-      <div>
-        <p>Loadgen drives a realistic mix and reports <b>server-side</b> latency (nginx <code class="inl">rt=</code> percentiles over the run window) — client fork overhead never pollutes the number.</p>
-        <table class="mt">
-          <thead><tr><th>Config</th><th>.env</th></tr></thead>
-          <tbody>
-            <tr><td><b>off</b> (baseline)</td><td>applog 0, otel unset</td></tr>
-            <tr><td>applog</td><td>applog 1, otel unset</td></tr>
-            <tr><td>otel-spool</td><td>+ endpoint, <i>no collector</i></td></tr>
-            <tr><td>otel-full</td><td>+ collector running</td></tr>
-          </tbody>
-        </table>
-      </div>
-      <div class="card glow">
-        <h3 class="accent">Protocol</h3>
+    <div class="kicker">Tracing</div>
+    <h2>W3C trace context — <span class="accent">end to end, no heavy SDK</span></h2>
+    <p class="mt8" style="margin-bottom:18px;">We use the standard <code class="inl">traceparent</code> header so one submission can be followed across every process — web, workers, and the outbound webhook — with our own small <code class="inl">lib/Trace.php</code>, no vendor agent.</p>
+    <div class="grid g2">
+      <div class="card">
+        <h3 class="accent">How it's wired</h3>
         <ul style="margin-top:6px;">
-          <li>Quiet machine, identical duration/concurrency.</li>
-          <li>1 warm-up (discarded) + 3 measured runs / config.</li>
-          <li>Sample web/otel pid CPU + RSS mid-run.</li>
-          <li>Compare <b>medians</b>, not single runs.</li>
+          <li>Incoming <code class="inl">traceparent</code> adopted on ingress (else a fresh trace starts).</li>
+          <li>Context embedded in every queue job → workers resume the same trace.</li>
+          <li>Forwarded on the outbound webhook — the trace leaves the stack.</li>
+          <li>Every response carries an <code class="inl">X-Trace-Id</code> header.</li>
         </ul>
-        <pre class="mt8">delta = median(p50 cfg) − median(p50 off)
-<span class="c"># also watch rps — overhead can</span>
-<span class="c"># show up as throughput loss</span></pre>
+      </div>
+      <div class="card">
+        <h3 class="accent">How it ships</h3>
+        <ul style="margin-top:6px;">
+          <li>Spans are written to a local spool file — never sent inline.</li>
+          <li>An <code class="inl">otel</code> sidecar ships them to any OTLP collector.</li>
+          <li>One switch: <code class="inl">OTEL_EXPORTER_OTLP_ENDPOINT</code> in <code class="inl">.env</code>.</li>
+          <li>Unset ⇒ tracing fully off, zero cost on the request path.</li>
+        </ul>
       </div>
     </div>
+    <div class="callout mt">JotForm propagates its own <span class="mono">JF-Trace-Parent-ID</span>; we use the open <span class="mono">W3C</span> standard — same idea, portable to any tracing backend.</div>
   </section>
 
   <!-- 12 FAILURE DRILLS -->
@@ -543,48 +466,21 @@
         <thead><tr><th>Drill</th><th>Command</th><th>Expected behavior</th></tr></thead>
         <tbody>
           <tr><td>Web instance dies</td><td><span class="mono">launch.sh kill web1</span></td><td class="s-ok">LB serves via web2; /status flags it; max_fails ejects</td></tr>
-          <tr><td>Redis outage</td><td><span class="mono">redis-cli shutdown</span></td><td class="s-warn">cache/queues degrade; healthz→503; mysql sessions survive; workers reconnect</td></tr>
+          <tr><td>Redis outage</td><td><span class="mono">redis-cli shutdown</span></td><td class="s-warn">cache/queues degrade; healthz→503; workers reconnect</td></tr>
           <tr><td>Worker dies</td><td><span class="mono">launch.sh kill worker-pdf</span></td><td class="s-warn">PDFs queue up; heartbeat vanishes; restart drains backlog</td></tr>
           <tr><td>Webhook receiver fails</td><td><span class="mono">webhook-sink ?fail=1</span></td><td class="s-bad">3 attempts → dead-letter <span class="mono">queue:dead</span> → row <span class="mono">failed</span></td></tr>
           <tr><td>gearmand outage</td><td><span class="mono">launch.sh kill gearmand</span></td><td class="s-ok">push falls back to Redis; nothing lost; auto re-registers</td></tr>
         </tbody>
       </table>
     </div>
-    <div class="callout">Each drill is observable through the <b>same three layers</b> — so we validate the SLIs actually <i>catch</i> the failure, not just that the failure happens.</div>
-  </section>
-
-  <!-- 13 HEALTH MODEL -->
-  <section class="slide">
-    <div class="kicker">Health model</div>
-    <h2>Liveness contract + single pane of glass</h2>
-    <div class="grid g2 mt">
-      <div class="card"><h3 class="cyan">Every HTTP service: <code class="inl">/healthz</code></h3><p>Checks its real deps (db, redis) → 200/503. FPM mode probes per-pool through nginx: <code class="inl">/__pool/web1/healthz</code> + <code class="inl">/fpm-status</code> (active procs, listen queue — first-class SLI surfaces).</p></div>
-      <div class="card"><h3 class="green">Workers: heartbeat, not HTTP</h3><p><code class="inl">SETEX heartbeat:&lt;instance&gt; 15s</code> every loop. <b>Absent key ⇒ down.</b> The status service calls a worker dead when the key expires.</p></div>
-    </div>
-    <div class="card glow mt">
-      <h3 class="accent">Node status dashboard — <code class="inl">/status</code>, <code class="inl">/api/status</code></h3>
-      <p>One screen probes LB · web1 · web2 · MySQL · Redis · gearmand · queue depths · heartbeats · usage stats, every 5s. It's what makes load balancing and failure <b>visible</b> during the demo.</p>
-    </div>
-  </section>
-
-  <!-- 14 TAKEAWAYS -->
-  <section class="slide">
-    <div class="kicker">Takeaways</div>
-    <h2>Why this de-risks the production rollout</h2>
-    <div class="grid g3 mt">
-      <div class="card glow"><h3 class="accent">1 · Faithful</h3><p>Same runtime shape as JotForm — FPM, gearman, MySQL sessions, hybrid React frontend, W3C trace propagation. SLIs validated here transfer.</p></div>
-      <div class="card glow"><h3 class="accent">2 · Measurable</h3><p>Every observability layer toggles independently, so we quantify overhead before it lands in prod — with a repeatable A/B ledger.</p></div>
-      <div class="card glow"><h3 class="accent">3 · Breakable</h3><p>Induced failures on demand prove the SLIs actually fire under outages — not just that the system has metrics.</p></div>
-    </div>
-    <div class="callout mt" style="margin-top:22px;">ReliableForm answers "<i>is this SLI correct, what does it cost, does it fire under failure?</i>" <b>before</b> the answer matters on production JotForm.</div>
-    <p class="lead" style="margin-top:22px;">Thank you — questions?</p>
+    <div class="callout">Every drill is visible through metrics, structured logs, and the live status page.</div>
   </section>
 
   <!-- chrome -->
   <div class="progress" id="progress"></div>
   <div class="chrome">
     <div class="l"><span class="dot"></span><b style="color:#dbe3ef;">ReliableForm</b> · Architecture &amp; SRE</div>
-    <div id="counter">1 / 14</div>
+    <div id="counter">1 / 9</div>
   </div>
 </div>
 

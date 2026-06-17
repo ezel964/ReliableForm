@@ -205,12 +205,13 @@ check_gearmand() {
     return 0
 }
 
-# Backing-service runtime (INFRA_RUNTIME=auto|podman|host). podman runs
+# Backing-service runtime (INFRA_RUNTIME=podman|auto|host). podman runs
 # MySQL/Redis/gearmand as containers (config/podman/compose.yaml); host uses
-# system-installed services. auto prefers podman when usable, else falls back
-# to host with the red-box warning. Docker is forbidden — podman compose only.
+# system-installed services. podman is the default and requires Podman;
+# auto soft-falls back to host with a warning. Docker is forbidden — podman
+# compose only.
 INFRA_RUNTIME_CFG="${INFRA_RUNTIME:-}"
-[ -z "$INFRA_RUNTIME_CFG" ] && INFRA_RUNTIME_CFG="$(env_get INFRA_RUNTIME auto)"
+[ -z "$INFRA_RUNTIME_CFG" ] && INFRA_RUNTIME_CFG="$(env_get INFRA_RUNTIME podman)"
 INFRA_MODE=""
 case "$INFRA_RUNTIME_CFG" in
     host) INFRA_MODE="host" ;;

@@ -40,7 +40,8 @@ services:
     container_name: rf-full-mysql
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpass}
+      # Throwaway random root — the app only ever uses DB_USER/DB_PASS.
+      MYSQL_RANDOM_ROOT_PASSWORD: "yes"
       MYSQL_DATABASE: ${DB_NAME:-reliableform}
       MYSQL_USER: ${DB_USER:-reliableform}
       MYSQL_PASSWORD: ${DB_PASS:-reliableform}
@@ -114,14 +115,16 @@ services:
     container_name: rf-full-status
     restart: unless-stopped
     working_dir: /app/apps/status
-    # Install the one dependency (mysql2) into the mounted volume on first
-    # boot, then run the service.
-    command: ["sh", "-c", "npm install --no-audit --no-fund --loglevel=error && node server.js"]
+    # Install the one dependency (mysql2) only when it is missing, into a NAMED
+    # volume mounted over node_modules — so this never writes into the host
+    # working tree and only runs on a fresh volume (not every `full up`).
+    command: ["sh", "-c", "[ -d node_modules/mysql2 ] || npm install --no-audit --no-fund --loglevel=error; node server.js"]
     environment:
       <<: *app-env
       INSTANCE_ID: status
     volumes:
       - ../../:/app
+      - rf-full-status-modules:/app/apps/status/node_modules
     depends_on:
       mysql: { condition: service_healthy }
       redis: { condition: service_healthy }
@@ -187,3 +190,4 @@ services:
 
 volumes:
   rf-full-mysql-data:
+  rf-full-status-modules:

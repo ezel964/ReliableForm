@@ -175,10 +175,12 @@ find_nginx() {
 # Service probes.
 # ---------------------------------------------------------------------------
 
-# redis_running — 0 when redis answers PING.
+# redis_running — 0 when redis answers PING. Uses redis_cli (scripts/podman.sh,
+# sourced below), which prefers a host redis-cli and falls back to
+# `podman exec rf-redis redis-cli` in podman mode — so this works even when no
+# host redis-cli is installed.
 redis_running() {
-    have redis-cli || return 1
-    [ "$(redis-cli -h "$(env_get REDIS_HOST 127.0.0.1)" -p "$(env_get REDIS_PORT 6379)" ping 2>/dev/null)" = "PONG" ]
+    [ "$(redis_cli ping 2>/dev/null)" = "PONG" ]
 }
 
 # mysql_running — PHP PDO probe (uses the app's own config + 3s timeout).

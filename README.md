@@ -36,6 +36,39 @@ queues: every submission asynchronously produces a **PDF report**
 `storage/mail/` — nothing is ever really sent), and — when the form has one —
 a **webhook delivery** (JSON POST with retries and a dead-letter queue).
 
+## Setup — Podman (required)
+
+The stateful tier — **MySQL, Redis, gearmand** — runs in [Podman](https://podman.io)
+containers (`config/podman/compose.yaml`), driven by `setup.sh`/`launch.sh`
+through `podman compose`. **Docker is not used.** Install Podman and a compose
+provider before the first run:
+
+```bash
+# macOS
+brew install podman podman-compose
+podman machine init && podman machine start
+
+# Linux (Debian/Ubuntu)
+sudo apt-get install podman podman-compose
+```
+
+Verify compose works:
+
+```bash
+podman compose version    # or: podman-compose version
+```
+
+The containers publish to the **same `127.0.0.1` ports** the app expects
+(3306/6379/4730). If you already run host Redis or MySQL (e.g. via Homebrew),
+stop them first or Podman will fail to bind:
+
+```bash
+brew services stop redis mysql    # macOS; Linux: sudo systemctl stop redis-server mysql
+```
+
+`INFRA_RUNTIME=podman` is the default in `.env`. Set `INFRA_RUNTIME=host` only
+when you intentionally want system-installed services instead.
+
 ## Quick start
 
 ```bash
@@ -43,27 +76,19 @@ bash setup.sh    # one time: checks/installs deps (asks first), creates DB, seed
 bash launch.sh   # starts everything, prints a ✓/✗ health table
 ```
 
-Both scripts are interactive — if Redis/Nginx/MySQL/PHP/Node are missing or
-not running they say so and offer to fix it (Homebrew on macOS, apt on
+Both scripts are interactive — if Nginx/PHP/Node (or Podman, in the default
+mode) are missing they say so and offer to fix it (Homebrew on macOS, apt on
 Linux). Add `--yes` to either script for non-interactive/CI use. Schema
 changes ship as `db/migrations/*.sql`; re-running `setup.sh` applies pending
 ones (see [docs/RUNBOOK.md](docs/RUNBOOK.md)).
 
-### Backing services run in Podman (not Docker)
-
-The stateful tier — **MySQL, Redis, gearmand** — runs in [Podman](https://podman.io)
-containers, defined once in `config/podman/compose.yaml` and driven by
-`setup.sh`/`launch.sh` through `podman compose`. Docker is intentionally not
-used. The containers publish to the **same `127.0.0.1` ports** the app already
-expects (3306/6379/4730), so nothing else in the stack changes between modes.
-
-`INFRA_RUNTIME` in `.env` (env var overrides) selects the mode:
+`INFRA_RUNTIME` in `.env` (env var overrides) selects the backing-service mode:
 
 | value | behavior |
 |---|---|
-| `auto` (default) | use Podman when usable (on macOS it offers to start the `podman machine`); otherwise show a red-box warning and fall back to host-installed MySQL/Redis/gearmand |
-| `podman` | require Podman (offers a host fallback if it is unavailable) |
-| `host` | the classic path: system-installed services via brew/systemctl |
+| `podman` (default) | require Podman; on macOS offers to start the `podman machine`; offers a host fallback only if Podman is unavailable |
+| `auto` | use Podman when usable; otherwise show a red-box warning and fall back to host-installed MySQL/Redis/gearmand |
+| `host` | system-installed services via brew/systemctl (no Podman) |
 
 The **app tier (web1/web2, status, workers, nginx) stays as host processes** so
 the per-instance chaos-kill drills and php-fpm parity are unaffected. To run the

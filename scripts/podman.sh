@@ -15,7 +15,7 @@
 PODMAN_COMPOSE_FILE="$ROOT/config/podman/compose.yaml"
 PODMAN_FULL_COMPOSE_FILE="$ROOT/config/podman/compose.full.yaml"
 
-# Cache for the resolved compose command (set on first compose_cmd call).
+# Cache for the resolved compose command (set on first resolve_compose_cmd).
 PODMAN_COMPOSE_CMD=""
 
 # ---------------------------------------------------------------------------
@@ -30,9 +30,9 @@ podman_warn_box() {
     printf '  │  services (MySQL, Redis, gearmand) run in Podman.      │\n'
     printf '  │                                                        │\n'
     printf '  │  Install it:                                           │\n'
-    printf '  │    macOS:  brew install podman                         │\n'
+    printf '  │    macOS:  brew install podman podman-compose          │\n'
     printf '  │            podman machine init && podman machine start │\n'
-    printf '  │    Linux:  sudo apt-get install podman                 │\n'
+    printf '  │    Linux:  sudo apt-get install podman podman-compose  │\n'
     printf '  └────────────────────────────────────────────────────────┘\n'
     printf '%s' "${C_RESET}"
 }
@@ -90,15 +90,15 @@ podman_available() {
 }
 
 # ---------------------------------------------------------------------------
-# compose_cmd — echo the compose invocation prefix, preferring the built-in
-# `podman compose` over the standalone `podman-compose`. Cached after the
-# first resolution. Returns 1 when neither is available.
+# resolve_compose_cmd — set the global PODMAN_COMPOSE_CMD to the compose
+# invocation prefix, preferring the built-in `podman compose` over the
+# standalone `podman-compose`. Resolved once per shell (the probe is the slow
+# part) — it sets a GLOBAL directly rather than echoing, so the cache survives
+# (a `$(...)` wrapper would cache only inside the subshell). Returns 1 when
+# neither provider is available.
 # ---------------------------------------------------------------------------
-compose_cmd() {
-    if [ -n "$PODMAN_COMPOSE_CMD" ]; then
-        printf '%s' "$PODMAN_COMPOSE_CMD"
-        return 0
-    fi
+resolve_compose_cmd() {
+    [ -n "$PODMAN_COMPOSE_CMD" ] && return 0
     if podman compose version >/dev/null 2>&1; then
         PODMAN_COMPOSE_CMD="podman compose"
     elif have podman-compose; then
@@ -106,7 +106,6 @@ compose_cmd() {
     else
         return 1
     fi
-    printf '%s' "$PODMAN_COMPOSE_CMD"
     return 0
 }
 
@@ -117,14 +116,32 @@ compose_cmd() {
 # ---------------------------------------------------------------------------
 infra_compose() {
     local file="$1"; shift
-    local cc=""
-    cc="$(compose_cmd)" || { err "No 'podman compose' or 'podman-compose' available."; return 1; }
+    resolve_compose_cmd || { err "No 'podman compose' or 'podman-compose' available."; return 1; }
     if [ -f "$ROOT/.env" ]; then
-        # shellcheck disable=SC2086  # cc is an intentionally word-split prefix
-        $cc -f "$file" --env-file "$ROOT/.env" "$@"
+        # shellcheck disable=SC2086  # PODMAN_COMPOSE_CMD is an intentional prefix
+        $PODMAN_COMPOSE_CMD -f "$file" --env-file "$ROOT/.env" "$@"
     else
         # shellcheck disable=SC2086
-        $cc -f "$file" "$@"
+        $PODMAN_COMPOSE_CMD -f "$file" "$@"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# redis_cli <args...> — run redis-cli against the app Redis. Prefers a host
+# redis-cli (works for both host mode and the podman-published port); when no
+# host client exists, falls back to `podman exec rf-redis redis-cli` so podman
+# mode needs no host redis-cli installed at all. Returns 1 when neither works.
+# ---------------------------------------------------------------------------
+redis_cli() {
+    local host port
+    host="$(env_get REDIS_HOST 127.0.0.1)"
+    port="$(env_get REDIS_PORT 6379)"
+    if have redis-cli; then
+        redis-cli -h "$host" -p "$port" "$@"
+    elif [ "${INFRA_MODE:-}" = "podman" ] && have podman; then
+        podman exec -i rf-redis redis-cli "$@"
+    else
+        return 1
     fi
 }
 
